@@ -1,0 +1,10 @@
+.scaffold
+node_modules
+addon/content/runtime
+coverage
+.deps-install
+prototypes/phase0/.cache
+prototypes/phase0/embedding/.python
+prototypes/phase0/scratch
+package-lock.json
+pnpm-lock.yaml

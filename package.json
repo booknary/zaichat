@@ -1,0 +1,51 @@
+{
+  "name": "zaichat",
+  "type": "module",
+  "version": "0.8.0-beta.46",
+  "description": "A local-first conversational literature management agent for Zotero.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/booknary/zaichat.git"
+  },
+  "homepage": "https://github.com/booknary/zaichat",
+  "config": {
+    "addonName": "ZaiChat",
+    "addonID": "zaichat@booknary.github.io",
+    "addonRef": "zaichat",
+    "addonInstance": "ZaiChat",
+    "prefsPrefix": "extensions.zotero.zaichat"
+  },
+  "author": "booknary",
+  "license": "MIT",
+  "scripts": {
+    "start": "zotero-plugin serve",
+    "build": "node tools/archive-xpi.mjs && node tools/prepare-bundled-runtime.mjs && zotero-plugin build && npm run typecheck && node tools/archive-xpi.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint:check": "prettier --check . && eslint .",
+    "lint:fix": "prettier --write . && eslint . --fix",
+    "test": "vitest run",
+    "test:zotero": "node tools/archive-xpi.mjs && node tools/prepare-bundled-runtime.mjs && zotero-plugin test --no-watch"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zotero-plugin-toolkit": "5.1.0-beta.13"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/react": "^18.3.20",
+    "@types/react-dom": "^18.3.6",
+    "@zotero-plugin/eslint-config": "0.6.7",
+    "eslint": "^9.39.2",
+    "prettier": "^3.7.4",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4",
+    "zotero-plugin-scaffold": "0.8.2",
+    "zotero-types": "4.1.0-beta.4"
+  },
+  "prettier": {
+    "printWidth": 88,
+    "tabWidth": 2,
+    "endOfLine": "lf"
+  }
+}

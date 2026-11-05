@@ -19,6 +19,7 @@ import {
 } from "../retrieval/terminology";
 import { ZoteroRetriever } from "../host/zoteroRetriever";
 import { createID, nowISO } from "../utils/ids";
+import { candidateAuthors, candidateExcerpt } from "../utils/candidatePreview";
 import { sanitizeNoteHTML, sanitizeTag } from "../utils/sanitize";
 import {
   candidateAllowance,
@@ -37,12 +38,14 @@ import { ComparisonLedger, comparisonRequested } from "./comparisonLedger";
 import {
   methodEvidenceIssue,
   evidenceFactProblems,
+  normalizeEvidenceFacts,
   methodAbsenceProblems,
   methodQuestion,
   categoricalSupplementAbsence,
   EvidenceFact,
 } from "./methodEvidence";
 import { causalClaimProblems } from "./answerClaims";
+import { coverageClaimProblems } from "./coverageClaims";
 import { repairAnswerDraft, type AnswerDraft } from "./answerRepair";
 
 export interface ToolExecutionContext {
@@ -71,6 +74,12 @@ export class ToolRegistry {
   private candidateAttachmentsByItem = new Map<string, ZoteroObjectRef[]>();
   private activePlan?: RetrievalPlan;
   private planRevisionCount = 0;
+  private userGuidancePending = false;
+
+  acceptUserGuidance(): void {
+    this.userGuidancePending = true;
+    this.answerDraft = undefined;
+  }
   private candidateObservationCorpus = "";
   private remainingCandidates: any[] = [];
   private pagedSources: SourceReference[] = [];
@@ -138,11 +147,24 @@ export class ToolRegistry {
       reviewedInCurrentPool: [...this.poolKeys].filter((key) =>
         this.deliveredKeys.has(key),
       ).length,
+      previewedInCurrentPool: [...this.poolKeys].filter((key) =>
+        this.deliveredKeys.has(key),
+      ).length,
+      abstractsWithDeliveredText: new Set(
+        [...this.sourceWhitelist.values()]
+          .filter((source) => source.field === "abstract" && source.snippet)
+          .map((source) => source.item.libraryID + ":" + source.item.itemKey),
+      ).size,
+      papersWithDeliveredFulltext: new Set(
+        [...this.sourceWhitelist.values()]
+          .filter((source) => source.field === "fulltext" && source.snippet)
+          .map((source) => source.item.libraryID + ":" + source.item.itemKey),
+      ).size,
       fulltextDeferred: this.fulltextDeferred,
       resumedPaging: this.resumedPaging,
       scope: "bounded candidate pool, never the entire library",
       instruction:
-        "Use these exact unique counts, not requested page sizes. Remaining candidates or unindexed data prohibit exhaustive absence claims. A restarted search is not continuation of an old pool.",
+        "Use these exact unique counts, not requested page sizes. reviewedInCurrentPool is a legacy alias for previewedInCurrentPool, not full reading or method verification. Abstract/fulltext counts mean text delivered, not all claims verified. Even an exhausted candidate pool cannot prove library-wide uniqueness or absence. A restarted search is not continuation of an old pool.",
     };
   }
 
@@ -161,6 +183,23 @@ export class ToolRegistry {
 
   definitions(): any[] {
     return [
+      definition(
+        "request_clarification",
+        "Pause and ask the user only when ambiguity materially changes the task, including unresolved references to other/another papers after checking attached and current conversation context. Provide a concise question and optional choices. The application waits for a free-text reply or choice before continuing. Do not use this to ask permission for routine authorized reading/searching, to bypass write approval, or to repeat an answered question.",
+        {
+          type: "object",
+          properties: {
+            question: { type: "string", maxLength: 1200 },
+            choices: {
+              type: "array",
+              items: { type: "string", maxLength: 200 },
+              maxItems: 6,
+            },
+          },
+          required: ["question"],
+          additionalProperties: false,
+        },
+      ),
       definition(
         "read_collection_items",
         "Read compact titles/dates and count directly from a My Library collection, without search or embeddings. Identify collectionKey using list_collections or the attached collection. Defaults to direct members only; include subcollections only if requested. Pages contain 20 entries; use nextOffset. Do not read abstracts just to count/list papers. For large sets report the count and ask the user to narrow the scope before bulk reading.",
@@ -538,6 +577,7 @@ export class ToolRegistry {
     this.candidateAttachmentsByItem.clear();
     this.activePlan = undefined;
     this.planRevisionCount = 0;
+    this.userGuidancePending = false;
     this.candidateObservationCorpus = "";
   }
   topCandidateRefs(limit = 6): ZoteroObjectRef[] {
@@ -553,6 +593,33 @@ export class ToolRegistry {
     try {
       const args = ensureObject(call.arguments);
       switch (call.name) {
+        case "request_clarification": {
+          const question =
+            typeof args.question === "string" ? args.question.trim() : "";
+          if (
+            !question ||
+            question.length > 1200 ||
+            Object.keys(args).some((key) => !["question", "choices"].includes(key)) ||
+            (args.choices !== undefined &&
+              (!Array.isArray(args.choices) ||
+                args.choices.length > 6 ||
+                args.choices.some(
+                  (choice: unknown) =>
+                    typeof choice !== "string" || !choice.trim() || choice.length > 200,
+                )))
+          )
+            throw new Error(
+              "Supply a question (1–1200 characters) and up to six short choices",
+            );
+          return {
+            ...result(call, true, {}, "Waiting for your reply"),
+            question: {
+              id: call.id,
+              question,
+              choices: [...new Set<string>(args.choices || [])],
+            },
+          };
+        }
         case "list_attachments": {
           const ref = parseRef(args.ref);
           const key = `${ref.libraryID}:${ref.itemKey}`;
@@ -627,7 +694,7 @@ export class ToolRegistry {
             scanTruncated: page.scanTruncated,
             nextOffset: count && offset + count < page.total ? offset + count : null,
             instruction:
-              "Author-field matches only, not person identity or corresponding-author proof. No vector index, PDF or abstract search was used. Count is exhaustive only if scanTruncated=false; missing creator metadata can still cause omissions. Missing date stays unknown, not prepublication.",
+              "Author-field matches only, not person identity or corresponding-author proof. No vector index, PDF or abstract search was used. Names use Given Family or Family, Given; compatible given-name initials match, surname initials do not. Name order without a comma is not interchangeable. totalAvailable counts matches, not records delivered; do not describe all names from one page. Count is exhaustive only if scanTruncated=false; missing creator metadata can still cause omissions. Missing date stays unknown, not prepublication.",
           };
           return read;
         }
@@ -902,6 +969,11 @@ export class ToolRegistry {
           const rememberedIssues = rememberedItemPlanIssues(query);
           if (rememberedIssues.length) throw new Error(rememberedIssues.join("; "));
           const explicitRevisionReason = String(args.revisionReason || "").trim();
+          if (this.userGuidancePending) {
+            this.activePlan = undefined;
+            this.planRevisionCount = 0;
+            this.userGuidancePending = false;
+          }
           const rationale = String(args.rationale || "").trim();
           const revisionReason =
             explicitRevisionReason ||
@@ -1441,9 +1513,11 @@ export class ToolRegistry {
         }
         case "finish_answer": {
           const input = call.arguments as Record<string, any>;
-          const args = input.repair
-            ? repairAnswerDraft(this.answerDraft, input)
-            : input;
+          const args =
+            input.repair !== undefined ||
+            (input.answer === undefined && Array.isArray(input.evidenceFacts))
+              ? repairAnswerDraft(this.answerDraft, input)
+              : { ...input };
           if (typeof args.answer !== "string" || !args.answer.trim())
             throw new Error(
               "finish_answer needs a nonempty answer or repair of a rejected draft",
@@ -1520,15 +1594,6 @@ export class ToolRegistry {
             sourceIDs,
           };
           if (
-            this.remainingCandidates.length &&
-            /(?:已.{0,8}(?:全部|所有).{0,5}(?:翻完|看完|查看完)|库中(?:确实|绝对)?没有|\b(?:all candidates (?:have been|were) reviewed|no such papers exist in (?:your|the) library)\b)/iu.test(
-              answer,
-            )
-          )
-            throw new Error(
-              "Unseen candidates remain. Do not claim all candidates were reviewed or that the library has no matching papers. State the measured coverage and bounded uncertainty.",
-            );
-          if (
             !sourceIDs.length &&
             args.evidenceInsufficient !== true &&
             !this.emptyFeedRange &&
@@ -1575,14 +1640,29 @@ export class ToolRegistry {
             throw new Error(
               "Attachment names, unclassified files and unread/unsupported caches cannot prove supplements are absent. State that no explicitly labeled supplement was identified, and disclose unresolved files.",
             );
-          const facts = (
-            Array.isArray(args.evidenceFacts) ? args.evidenceFacts : []
-          ) as EvidenceFact[];
+          const normalizedFacts = normalizeEvidenceFacts(
+            (Array.isArray(args.evidenceFacts)
+              ? args.evidenceFacts
+              : []) as EvidenceFact[],
+            [...this.sourceWhitelist.values()],
+          );
+          const facts = normalizedFacts.facts;
+          args.evidenceFacts = facts;
+          this.answerDraft = { ...this.answerDraft!, evidenceFacts: facts };
           const methodAudit =
             methodQuestion(context.userQuery || "") ||
             this.activePlan?.intent === "method_use";
           const problems = [
-            ...evidenceFactProblems(sources, facts),
+            ...(this.activePlan || this.poolKeys.size || this.remainingCandidates.length
+              ? coverageClaimProblems(answer, this.remainingCandidates.length)
+              : []),
+            ...normalizedFacts.problems,
+            ...evidenceFactProblems(sources, facts).filter(
+              (problem) =>
+                !normalizedFacts.problems.some(
+                  (invalid) => invalid.factIndex === problem.factIndex,
+                ),
+            ),
             ...causalClaimProblems(answer, sources),
             ...(methodAudit ? methodAbsenceProblems(answer, sources, facts) : []),
           ];
@@ -1599,7 +1679,7 @@ export class ToolRegistry {
               call,
               false,
               {
-                error: issue || problems[0].message,
+                error: problems[0]?.message || issue,
                 issues: problems.slice(0, 8),
                 draftRetained: true,
                 availableEvidence: this.evidenceChoices().slice(0, 6),
@@ -1918,17 +1998,27 @@ export class ToolRegistry {
     fullAuthors = false,
     authorName?: string,
   ): ToolResult {
-    let compactItems = items.map(compactCandidatePayload) as T[];
+    const previewTerms = this.activePlan ? recallTerms(this.activePlan) : [];
+    let compactItems = items.map((item) =>
+      compactCandidatePayload(item, previewTerms),
+    ) as T[];
     if (fullAuthors)
       compactItems = compactItems.map((item: any, index) => ({
         ...item,
-        ...(authorName
-          ? authorEvidence((items[index] as any).authors || [], authorName)
-          : {
-              authors: (items[index] as any).authors || [],
-              authorCount: ((items[index] as any).authors || []).length,
-              authorsTruncated: false,
-            }),
+        ...((items[index] as any).readWarnings?.includes("authors")
+          ? {
+              authorCount: null,
+              authorsTruncated: true,
+              fullAuthorFieldChecked: false,
+              authorMatches: [],
+            }
+          : authorName
+            ? authorEvidence((items[index] as any).authors || [], authorName)
+            : {
+                authors: (items[index] as any).authors || [],
+                authorCount: ((items[index] as any).authors || []).length,
+                authorsTruncated: false,
+              }),
       })) as T[];
     const allowance = Math.max(0, Math.min(candidateAllowance(budget), perCallLimit));
     const preview =
@@ -1942,8 +2032,12 @@ export class ToolRegistry {
         item?.item?.itemKey
           ? {
               ...item,
-              abstractExcerpt: clipCandidateText(item.abstractExcerpt, 120),
-              authors: fullAuthors ? item.authors : (item.authors || []).slice(0, 3),
+              abstractExcerpt: candidateExcerpt(
+                item.abstractExcerpt || "",
+                previewTerms,
+                120,
+              ),
+              ...(fullAuthors ? {} : candidateAuthors(item, 3)),
               tags: [],
               fulltextMatchTerms: (item.fulltextMatchTerms || []).slice(0, 3),
             }
@@ -2138,7 +2232,7 @@ export class ToolRegistry {
         ...(recalled.content as Record<string, unknown>),
         evidenceStatus: "verified-bibliographic-candidates",
         instruction:
-          "These sourceIDs refer to Zotero-verified bibliographic metadata. provenance and fulltextMatchTerms record compact discovery evidence, not contextual passages. Bibliographic identification can finish directly; claims about method use, results, or arguments require read_attachment_snippets.",
+          "These sourceIDs refer to Zotero-verified bibliographic metadata. Abstract windows and fulltextMatchTerms are discovery previews, not verified method evidence. authorsTruncated or authorCount=null prohibits complete-author-list or author-absence claims; use get_items(authorName) for complete-field checks. Read promising full abstracts before more paging, and passages only for unresolved details.",
       };
     }
   }
@@ -2483,7 +2577,7 @@ function parseStrings(value: unknown, max: number): string[] {
     .slice(0, max);
 }
 
-function compactCandidatePayload<T>(value: T): T {
+function compactCandidatePayload<T>(value: T, previewTerms: string[] = []): T {
   if (!value || typeof value !== "object") return value;
   const candidate = value as Record<string, any>;
   if (!candidate.item?.itemKey || typeof candidate.title !== "string") return value;
@@ -2496,14 +2590,18 @@ function compactCandidatePayload<T>(value: T): T {
       : undefined,
     doi: candidate.doi ? clipCandidateText(candidate.doi, 180) : undefined,
     date: candidate.date ? clipCandidateText(candidate.date, 80) : undefined,
-    authors: Array.isArray(candidate.authors) ? candidate.authors.slice(0, 6) : [],
+    ...candidateAuthors(candidate, 6),
     year: candidate.year,
     itemType: candidate.itemType,
     language: candidate.language,
     tags: Array.isArray(candidate.tags)
       ? candidate.tags.slice(0, 8).map((tag: unknown) => clipCandidateText(tag, 80))
       : [],
-    abstractExcerpt: clipCandidateText(candidate.abstractExcerpt, 240),
+    abstractExcerpt: candidateExcerpt(
+      String(candidate.abstractExcerpt || ""),
+      previewTerms,
+      240,
+    ),
     fulltextMatchTerms: Array.isArray(candidate.fulltextMatchTerms)
       ? candidate.fulltextMatchTerms
           .slice(0, 8)

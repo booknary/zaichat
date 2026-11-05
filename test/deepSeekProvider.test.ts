@@ -343,7 +343,7 @@ describe("official DeepSeek V4 protocol", () => {
     );
   });
 
-  it("L: preserves generic OpenAI-compatible request behavior", async () => {
+  it("L: keeps generic native tools without assuming vendor reasoning parameters", async () => {
     const bodies: any[] = [];
     mockJSONFetch(bodies, [textResponse("generic", "")]);
     const profile = {
@@ -355,7 +355,9 @@ describe("official DeepSeek V4 protocol", () => {
     await complete(profile, [], toolDefinitions());
     expect(resolveProviderCapabilities(profile).id).toBe("generic-openai-compatible");
     expect(bodies[0].tool_choice).toBe("auto");
-    expect(bodies[0].reasoning_effort).toBe("medium");
+    expect(bodies[0]).not.toHaveProperty("reasoning_effort");
+    expect(bodies[0]).not.toHaveProperty("thinking");
+    expect(bodies[0]).not.toHaveProperty("enable_thinking");
   });
 });
 

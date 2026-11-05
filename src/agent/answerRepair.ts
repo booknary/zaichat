@@ -14,13 +14,14 @@ export function repairAnswerDraft(
   if (input.answer !== undefined)
     throw new Error("Submit either a full answer or repair, not both");
   if (
-    !input.repair ||
-    typeof input.repair !== "object" ||
-    Array.isArray(input.repair) ||
-    Object.keys(input.repair).some((key) => key !== "answerPatches")
+    input.repair !== undefined &&
+    (!input.repair ||
+      typeof input.repair !== "object" ||
+      Array.isArray(input.repair) ||
+      Object.keys(input.repair).some((key) => key !== "answerPatches"))
   )
     throw new Error("Invalid answer repair object");
-  const patches = input.repair.answerPatches || [];
+  const patches = input.repair?.answerPatches ?? [];
   if (!Array.isArray(patches) || patches.length > 8)
     throw new Error("At most eight answer patches are allowed");
   if (!patches.length && !Array.isArray(input.evidenceFacts))

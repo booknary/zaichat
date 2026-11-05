@@ -5,6 +5,7 @@ import {
   EvidenceBudgetState,
   ModelProfile,
   PendingWriteBatch,
+  PendingUserQuestion,
   SourceReference,
   StoredMessage,
   StoredProtocolMessage,
@@ -26,16 +27,21 @@ import {
   stageForAgentState,
   toolsForAgentState,
   transitionAfterTool,
+  requestedWriteTools,
 } from "./agentState";
 import { resolveProviderCapabilities, stageModelOptions } from "./providerCapabilities";
 import { ToolRegistry } from "./toolRegistry";
 import { modelToolContent } from "./modelToolContent";
 import { retrievalStrategyPrompt } from "./retrievalStrategyPrompt";
 import { collectionFollowup, isPagingFollowup } from "./followupIntent";
+import { RunInteraction, SteeringInput, SteeringInterruption } from "./runInteraction";
 
 const MAX_SEARCH_PLAN_ATTEMPTS = 2;
 
 export interface AgentRunnerCallbacks {
+  onQuestion?(question?: PendingUserQuestion): void;
+  onSteeringApplied?(ids: string[]): void;
+  onAssistantReset?(): void;
   onRun(run: AgentRun): void;
   onAssistantDelta(text: string): void;
   onToolResult(result: ToolResult, event: AgentEvent): void;
@@ -52,6 +58,7 @@ export interface AgentRunResult {
 
 export class AgentRunner {
   private controller?: AbortController;
+  private interaction?: RunInteraction;
 
   constructor(
     private readonly provider: OpenAICompatibleProvider,
@@ -60,6 +67,12 @@ export class AgentRunner {
 
   cancel(): void {
     this.controller?.abort("cancelled");
+  }
+
+  steer(input: SteeringInput): void {
+    if (!this.interaction || this.controller?.signal.aborted)
+      throw new Error("No active run accepts guidance");
+    this.interaction.submit(input);
   }
 
   async run(
@@ -77,6 +90,8 @@ export class AgentRunner {
   ): Promise<AgentRunResult> {
     if (this.controller) throw new Error("Another Agent run is already active");
     this.controller = new AbortController();
+    const interaction = new RunInteraction();
+    this.interaction = interaction;
     const userMessages = messages.filter((message) => message.role === "user");
     const pagingRequested = isPagingFollowup(latestUserText(messages));
     const resumedPaging = this.tools.beginTurn?.(
@@ -103,7 +118,8 @@ export class AgentRunner {
       this.tools.searchLearningContext?.(latestUserText(messages)) || "",
       capabilities.requiresReasoningContentForToolCalls && profile.reasoningEnabled,
     );
-    const userQuery = latestUserText(messages);
+    let userQuery = latestUserText(messages);
+    const writePermissions = requestedWriteTools(userQuery);
     providerMessages.push({
       role: "system",
       content: `Current date: ${new Date().toISOString().slice(0, 10)}. A publication year equal to the current year is not a future year. For author-only questions prefer search_authors (creator fields, no vectors/PDF). Use match=any for OR and match=all for coauthorship; supply actual names rather than inferred research topics. For a supported answer call finish_answer directly, not a duplicate prose answer first. Before finalizing check counts, dates, qualifiers (up to/only/subsets), and known versus unknown facts. A scanned cache is not a fully read PDF or proof that supplements are absent.`,
@@ -188,7 +204,7 @@ export class AgentRunner {
         Math.floor(profile.contextBudgetChars * 0.65),
       ),
     };
-    const toolDefinitions = filterToolDefinitions(
+    let toolDefinitions = filterToolDefinitions(
       this.tools.definitions(),
       latestUserText(messages),
       agentState === "direct-reading",
@@ -207,8 +223,65 @@ export class AgentRunner {
       );
     }
     try {
-      const maxModelTurns = emergencyToolFuse + 12;
+      const applyGuidance = () => {
+        const inputs = interaction.take();
+        if (!inputs.length) return;
+        for (const input of inputs) {
+          if (input.context.ephemeralSelection)
+            context.ephemeralSelection = input.context.ephemeralSelection;
+          userQuery += `\n\nUser update (takes precedence where it corrects earlier scope): ${input.text}`;
+          for (const key of [
+            "items",
+            "attachments",
+            "notes",
+            "annotations",
+            "collections",
+          ] as const)
+            context.refs[key] = [
+              ...new Map(
+                [...context.refs[key], ...input.context.refs[key]].map((ref) => [
+                  JSON.stringify(ref),
+                  ref,
+                ]),
+              ).values(),
+            ].slice(0, 20) as any;
+        }
+        // Keep the exact task and updates together when old rounds are budget-trimmed.
+        providerMessages.push({
+          role: "user",
+          content: `[CURRENT_TASK_AND_USER_GUIDANCE]\n${userQuery}\n\n[EXPLICIT_CONTEXT_REFS]\n${JSON.stringify(context.refs)}${context.ephemeralSelection ? `\n[EPHEMERAL_SELECTED_TEXT]\n${context.ephemeralSelection}` : ""}`,
+        });
+        toolDefinitions = filterToolDefinitions(
+          this.tools.definitions(),
+          userQuery,
+          agentState === "direct-reading",
+        ).filter(
+          (entry) =>
+            !entry.function?.name?.startsWith("propose_") ||
+            writePermissions.has(entry.function.name),
+        );
+        this.tools.acceptUserGuidance?.();
+        searchPlanAttempts = 0;
+        signatureNoProgress.clear();
+        stateNoProgressCount = 0;
+        requiredActionRepairs = 0;
+        answer = "";
+        answerValidationPending = false;
+        answerValidationRepairs = 0;
+        forceFinalAnswer = false;
+        if (agentState === "final-synthesis") agentState = "evidence-ready";
+        run.status = "running";
+        run.events.push(
+          event("status", "User guidance applied", "user-guidance", "completed"),
+        );
+        callbacks.onAssistantReset?.();
+        callbacks.onSteeringApplied?.(inputs.map((input) => input.id));
+        callbacks.onRun({ ...run });
+      };
+      const maxModelTurns = emergencyToolFuse + 32;
       for (let iteration = 0; iteration < maxModelTurns; iteration++) {
+        if (this.controller.signal.aborted) throw this.controller.signal.reason;
+        applyGuidance();
         run.agentTurnCount = (run.agentTurnCount || 0) + 1;
         const availableTools = forceFinalAnswer
           ? []
@@ -263,32 +336,43 @@ export class AgentRunner {
             }),
           );
         }
-        const response = await this.provider.complete(
-          profile,
-          requestMessages,
-          availableTools,
-          this.controller.signal,
-          (delta) => {
-            if (!answerValidationPending) {
-              answer += delta;
-              callbacks.onAssistantDelta(delta);
-            }
-          },
-          {
-            stage,
-            onRequestStatus: (status) => {
-              run.events.push(
-                event(
-                  "status",
-                  `Model request ${status.phase} (attempt ${status.attempt}, ${status.stage})`,
-                  "model-request",
-                  status.phase,
-                ),
-              );
-              callbacks.onRun({ ...run });
-            },
-          },
-        );
+        let response: Awaited<ReturnType<OpenAICompatibleProvider["complete"]>>;
+        try {
+          response = await interaction.request(
+            this.controller.signal,
+            (requestSignal) =>
+              this.provider.complete(
+                profile,
+                requestMessages,
+                availableTools,
+                requestSignal,
+                (delta) => {
+                  if (!requestSignal.aborted && !answerValidationPending) {
+                    answer += delta;
+                    callbacks.onAssistantDelta(delta);
+                  }
+                },
+                {
+                  stage,
+                  onRequestStatus: (status) => {
+                    run.events.push(
+                      event(
+                        "status",
+                        `Model request ${status.phase} (attempt ${status.attempt}, ${status.stage})`,
+                        "model-request",
+                        status.phase,
+                      ),
+                    );
+                    callbacks.onRun({ ...run });
+                  },
+                },
+              ),
+          );
+        } catch (error) {
+          if (error instanceof SteeringInterruption && !this.controller.signal.aborted)
+            continue;
+          throw error;
+        }
         run.events.push(usageEvent(response.usage));
         callbacks.onRun({ ...run });
         const reasoningContent = response.reasoningContent || "";
@@ -441,7 +525,7 @@ export class AgentRunner {
             run.status = "completed";
             run.finishedAt = nowISO();
             answer =
-              "No matching item was found in the two bounded searches of My Library. This does not show that no such publication exists outside the Zotero library. Try adding an author, year, organism, method name, or a distinctive title phrase.";
+              "No matching item was found in the two bounded searches of My Library. This does not show that no such publication exists outside the Zotero library. Try adding an author, year, study object, method name, or a distinctive title phrase.";
             callbacks.onRun({ ...run });
             return {
               run,
@@ -461,8 +545,9 @@ export class AgentRunner {
           };
         }
         const protocolRequired = Boolean(
-          capabilities.requiresReasoningContentForToolCalls &&
-          modelOptions.thinkingEnabled,
+          (capabilities.requiresReasoningContentForToolCalls &&
+            modelOptions.thinkingEnabled) ||
+          assistantMessage.responseItems?.length,
         );
         providerMessages.push({
           ...assistantMessage,
@@ -478,6 +563,21 @@ export class AgentRunner {
         }
         let candidateSetChangedInBatch = false;
         for (const call of response.toolCalls) {
+          if (this.controller.signal.aborted || interaction.hasPending) {
+            recordToolResult(
+              stoppedToolResult(
+                call,
+                "Skipped for cancellation or new user guidance; no operation performed",
+                "Use the latest user guidance before selecting another action.",
+              ),
+              run,
+              callbacks,
+              providerMessages,
+              protocolRequired,
+              protocolHistory,
+            );
+            continue;
+          }
           if (forceFinalAnswer) {
             providerMessages.push({
               role: "tool",
@@ -665,6 +765,44 @@ export class AgentRunner {
             maxAttachments: limits.maxAttachments,
             evidenceBudget,
           });
+          if (result.question) {
+            run.status = "waiting-user";
+            run.events.push(
+              event(
+                "status",
+                "Waiting for your reply",
+                "request_clarification",
+                "waiting",
+              ),
+            );
+            callbacks.onQuestion?.(result.question);
+            callbacks.onRun({ ...run });
+            try {
+              const reply = await interaction.waitForReply(
+                result.question,
+                this.controller.signal,
+              );
+              result.content = { question: result.question.question, answer: reply };
+              result.summary = "User clarification received";
+            } catch (error) {
+              recordToolResult(
+                {
+                  ...result,
+                  content: { cancelled: true, answer: null },
+                  summary: "Clarification cancelled",
+                },
+                run,
+                callbacks,
+                providerMessages,
+                protocolRequired,
+                protocolHistory,
+              );
+              throw error;
+            } finally {
+              callbacks.onQuestion?.(undefined);
+            }
+            run.status = "running";
+          }
           const progress = recordRunProgress(
             result,
             discoveredCandidates,
@@ -780,7 +918,9 @@ export class AgentRunner {
           if (
             call.name === "finish_answer" &&
             result.ok &&
-            !(result.content as any)?.error
+            !(result.content as any)?.error &&
+            !interaction.hasPending &&
+            !this.controller.signal.aborted
           ) {
             answer = String((result.content as any)?.answer || answer);
             sources = result.sources || sources;
@@ -794,7 +934,11 @@ export class AgentRunner {
               protocolHistory,
             };
           }
-          if (result.pendingBatch) {
+          if (
+            result.pendingBatch &&
+            !interaction.hasPending &&
+            !this.controller.signal.aborted
+          ) {
             run.status = "waiting-approval";
             run.pendingBatchID = result.pendingBatch.id;
             callbacks.onApproval(result.pendingBatch);
@@ -855,20 +999,40 @@ export class AgentRunner {
         role: "system",
         content: `The bounded Agent cycle is complete. Answer now without tools. Use only verified source IDs from this run: ${sources.map((source) => source.sourceID).join(", ") || "none"}. If none are available, state that the local search was inconclusive.`,
       });
-      const finalResponse = await this.provider.complete(
-        profile,
-        fitProviderMessages(
-          providerMessages,
-          Math.max(1000, profile.contextBudgetChars - 2000),
-        ),
-        [],
-        this.controller.signal,
-        (delta) => {
-          answer += delta;
-          callbacks.onAssistantDelta(delta);
-        },
-        { stage: "final-synthesis" },
-      );
+      let finalResponse:
+        | Awaited<ReturnType<OpenAICompatibleProvider["complete"]>>
+        | undefined;
+      for (let attempt = 0; attempt <= 20; attempt++) {
+        applyGuidance();
+        try {
+          finalResponse = await interaction.request(
+            this.controller.signal,
+            (requestSignal) =>
+              this.provider.complete(
+                profile,
+                fitProviderMessages(
+                  providerMessages,
+                  Math.max(1000, profile.contextBudgetChars - 2000),
+                ),
+                [],
+                requestSignal,
+                (delta) => {
+                  if (requestSignal.aborted) return;
+                  answer += delta;
+                  callbacks.onAssistantDelta(delta);
+                },
+                { stage: "final-synthesis" },
+              ),
+          );
+          break;
+        } catch (error) {
+          if (error instanceof SteeringInterruption && !this.controller.signal.aborted)
+            continue;
+          throw error;
+        }
+      }
+      if (!finalResponse)
+        throw new Error("Final response could not apply the pending guidance");
       run.events.push(usageEvent(finalResponse.usage));
       if (finalResponse.text) answer = finalResponse.text;
       answer ||=
@@ -893,6 +1057,10 @@ export class AgentRunner {
       run.status = this.controller.signal.aborted ? "cancelled" : "failed";
       run.finishedAt = nowISO();
       run.error = describeModelProviderError(error);
+      if (run.status === "failed") {
+        run.events.push(event("error", run.error, "agent-run", "failed"));
+        answer = answer ? `${answer}\n\n${run.error}` : run.error;
+      }
       callbacks.onRun({ ...run });
       return {
         run,
@@ -901,6 +1069,8 @@ export class AgentRunner {
         protocolHistory,
       };
     } finally {
+      callbacks.onQuestion?.(undefined);
+      this.interaction = undefined;
       this.controller = undefined;
     }
   }
@@ -1034,7 +1204,7 @@ export function fitProviderMessages(
     const size = blocks[index].size;
     if (size > remaining)
       throw new ModelProviderError(
-        "The latest DeepSeek tool exchange exceeds the configured context budget. Increase the context budget or reduce the evidence budget; required reasoning_content was not truncated.",
+        "The latest required tool exchange exceeds the configured context budget. Increase the context budget or reduce the evidence budget; required reasoning history was not truncated.",
         "invalid-response",
       );
     selected.add(index);

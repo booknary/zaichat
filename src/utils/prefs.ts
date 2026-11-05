@@ -52,22 +52,50 @@ export function normalizeModelProfile(value: any): ModelProfile | undefined {
   const protocol = ["auto", "native-tools", "json-actions"].includes(value.protocol)
     ? value.protocol
     : "auto";
-  const capabilities = resolveProviderCapabilities({ baseURL, model });
-  const allowedEfforts = capabilities.reasoningEffortValues;
+  const reasoningMode = [
+    "auto",
+    "default",
+    "thinking",
+    "enable-thinking",
+    "reasoning-effort",
+  ].includes(value.reasoningMode)
+    ? value.reasoningMode
+    : "auto";
+  const provider = ["auto", "custom", "deepseek", "bailian", "ark", "openai"].includes(
+    value.provider,
+  )
+    ? value.provider
+    : "auto";
+  const apiStyle = ["auto", "chat-completions", "responses"].includes(value.apiStyle)
+    ? value.apiStyle
+    : "auto";
+  const capabilities = resolveProviderCapabilities({
+    baseURL,
+    model,
+    reasoningMode,
+    provider,
+  });
+  // Preserve the saved choice when no effort parameter is being sent.
+  const allowedEfforts = capabilities.reasoningEffortValues.length
+    ? capabilities.reasoningEffortValues
+    : ["low", "medium", "high", "max"];
   const requestedEffort = String(value.reasoningEffort || "medium");
   const reasoningEffort = allowedEfforts.includes(requestedEffort as any)
     ? (requestedEffort as ModelProfile["reasoningEffort"])
-    : capabilities.id === "official-deepseek-v4"
+    : capabilities.reasoningEffortValues.includes("high")
       ? "high"
-      : "medium";
+      : capabilities.reasoningEffortValues[0] || "medium";
   return {
     id,
     displayName: String(value.displayName || model).trim() || model,
     baseURL,
+    provider,
+    apiStyle,
     apiKey: String(value.apiKey || "").trim(),
     model,
     protocol,
     streaming: value.streaming !== false,
+    reasoningMode,
     reasoningEnabled: Boolean(value.reasoningEnabled),
     reasoningEffort,
     timeoutMs: clampNumber(value.timeoutMs, 5000, 600000, 45000),

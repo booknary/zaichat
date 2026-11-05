@@ -2,6 +2,7 @@ export type MessageRole = "user" | "assistant" | "tool" | "system";
 export type AgentRunStatus =
   | "running"
   | "waiting-approval"
+  | "waiting-user"
   | "completed"
   | "failed"
   | "cancelled"
@@ -122,6 +123,9 @@ export interface StoredMessage {
   agentEvents?: AgentEvent[];
   protocolHistory?: StoredProtocolMessage[];
   error?: boolean;
+  followUp?: "steer" | "clarification";
+  delivery?: "pending" | "applied" | "not-applied";
+  questionID?: string;
   relevantSourceIDs?: string[];
   irrelevantSourceIDs?: string[];
 }
@@ -148,6 +152,21 @@ export interface ChatConversation {
   updatedAt: string;
   messages: StoredMessage[];
   lastRun?: AgentRun;
+  queuedMessages?: QueuedChatMessage[];
+}
+
+export interface PendingUserQuestion {
+  id: string;
+  question: string;
+  choices: string[];
+}
+
+export interface QueuedChatMessage {
+  id: string;
+  text: string;
+  createdAt: string;
+  contextRefs: MessageContextRefs;
+  needsReview?: boolean;
 }
 
 export interface ConversationIndexEntry {
@@ -162,10 +181,18 @@ export interface ModelProfile {
   id: string;
   displayName: string;
   baseURL: string;
+  provider?: "auto" | "custom" | "deepseek" | "bailian" | "ark" | "openai";
+  apiStyle?: "auto" | "chat-completions" | "responses";
   apiKey: string;
   model: string;
   protocol: "auto" | "native-tools" | "json-actions";
   streaming: boolean;
+  reasoningMode?:
+    | "auto"
+    | "default"
+    | "thinking"
+    | "enable-thinking"
+    | "reasoning-effort";
   reasoningEnabled: boolean;
   reasoningEffort: "low" | "medium" | "high" | "max";
   timeoutMs: number;
@@ -272,6 +299,8 @@ export interface RetrievedItem {
 }
 
 export interface RetrievalCandidate {
+  authorCount?: number | null;
+  authorsTruncated?: boolean;
   publicationTitle?: string;
   doi?: string;
   date?: string;
@@ -352,6 +381,7 @@ export interface ToolCall {
 }
 
 export interface ToolResult {
+  question?: PendingUserQuestion;
   retrievalRouteTrace?: Array<{
     routeIndex: number;
     hits: Array<{ libraryID: number; itemKey: string; rank: number; score: number }>;

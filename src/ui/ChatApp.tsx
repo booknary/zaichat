@@ -1,7 +1,14 @@
-import React, { useMemo, useRef, useState, useSyncExternalStore } from "react";
+import React, {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { groupSources, evidenceGroups } from "./sourceGroups";
 import { ChatManager } from "../core/chatManager";
 import { AvailableContext } from "../core/contextManager";
+import { reasoningLabel } from "../agent/providerCapabilities";
 import { ModelProfile, SourceReference } from "../core/types";
 import { compactAgentEvents } from "./agentEvents";
 import { evidenceCoverage } from "./evidenceCoverage";
@@ -9,11 +16,15 @@ import { MessageText } from "./MessageText";
 import { ModelPicker, ModelSelection } from "./ModelPicker";
 import { conversationUsage } from "../agent/tokenUsage";
 import { useMenuText } from "./menuLocale";
+import { SelectMenu } from "./SelectMenu";
+import { RunProgress } from "./RunProgress";
 
 export function ChatApp({
   manager,
   window: win,
   getProfile,
+  getProfiles,
+  getDefaultProfileID,
   getSettings,
   onExport,
   onLocate,
@@ -26,6 +37,8 @@ export function ChatApp({
   manager: ChatManager;
   window: _ZoteroTypes.MainWindow;
   getProfile: () => ModelProfile | undefined;
+  getProfiles?: () => ModelProfile[];
+  getDefaultProfileID?: () => string;
   getSettings: () => {
     systemPrompt: string;
     maxToolCalls: number;
@@ -36,7 +49,7 @@ export function ChatApp({
   onLocate: (source: SourceReference) => void;
   onOpen: (source: SourceReference) => void;
   onOpenSettings: () => void;
-  loadModels?: () => Promise<string[]>;
+  loadModels?: (profile?: ModelProfile) => Promise<string[]>;
   onSelectModel?: (value: ModelSelection) => void;
   onToggleDisplay?: () => void;
 }) {
@@ -47,11 +60,23 @@ export function ChatApp({
     manager.getSnapshot,
     manager.getServerSnapshot,
   );
+  const uiWindow = () => shellRef.current?.ownerDocument?.defaultView || win;
+  const [editing, setEditing] = useState<{ id: string; text: string }>();
+  const [editError, setEditError] = useState("");
+  const editRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (editing) editRef.current?.focus();
+  }, [editing?.id]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [draft, setDraft] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const draftKey = snapshot.active?.id || "new";
+  const draft = drafts[draftKey] || "";
+  const setDraft = (value: string) =>
+    setDrafts((previous) => ({ ...previous, [draftKey]: value }));
+  const [followUpMode, setFollowUpMode] = useState<"steer" | "queue">("steer");
   const [selectedContext, setSelectedContext] = useState<AvailableContext[]>([]);
   const [contextTick, setContextTick] = useState(0);
   const available = useMemo(
@@ -63,40 +88,61 @@ export function ChatApp({
     : snapshot.conversations;
   const profile = getProfile();
   const usage = conversationUsage(snapshot.active);
+  const activeRun =
+    snapshot.running && snapshot.runningConversationID === snapshot.active?.id;
+  useEffect(() => {
+    setSelectedContext([]);
+    setContextOpen(false);
+  }, [draftKey]);
 
-  const send = async () => {
+  const send = async (mode = followUpMode, reply?: string) => {
     const selectedProfile = getProfile();
     if (!selectedProfile) {
       onOpenSettings();
       return;
     }
-    const value = draft;
-    setDraft("");
+    const value = reply ?? draft;
+    if (!value.trim()) return;
+    if (reply === undefined) setDraft("");
     try {
-      await manager.send(
+      await manager.submit(
         value,
+        selectedContext,
+        selectedProfile,
+        getSettings().systemPrompt,
+        getSettings(),
+        snapshot.question ? "steer" : mode,
+      );
+    } catch (error) {
+      setDrafts((previous) =>
+        previous[draftKey] ? previous : { ...previous, [draftKey]: value },
+      );
+      uiWindow().alert(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const rerun = (messageID: string, current: string) => {
+    setEditError("");
+    setEditing({ id: messageID, text: current });
+  };
+  const submitEdit = async () => {
+    const selectedProfile = getProfile();
+    if (!editing?.text.trim() || !selectedProfile) return;
+    const message = editing;
+    setEditing(undefined);
+    try {
+      await manager.editAndRerun(
+        message.id,
+        message.text,
         selectedContext,
         selectedProfile,
         getSettings().systemPrompt,
         getSettings(),
       );
     } catch (error) {
-      win.alert(error instanceof Error ? error.message : String(error));
+      setEditing(message);
+      setEditError(error instanceof Error ? error.message : String(error));
     }
-  };
-
-  const rerun = async (messageID: string, current: string) => {
-    const value = win.prompt(t("Edit message"), current);
-    const selectedProfile = getProfile();
-    if (value != null && selectedProfile)
-      await manager.editAndRerun(
-        messageID,
-        value,
-        selectedContext,
-        selectedProfile,
-        getSettings().systemPrompt,
-        getSettings(),
-      );
   };
 
   return (
@@ -128,7 +174,7 @@ export function ChatApp({
             }
           >
             {profile
-              ? `${profile.model} · ${profile.reasoningEnabled ? t(profile.reasoningEffort) : t("思考关闭")} ▾`
+              ? `${profile.model} · ${t(reasoningLabel(profile))} ▾`
               : t("配置模型")}
           </button>
         </div>
@@ -137,7 +183,7 @@ export function ChatApp({
           title={t("Rename")}
           aria-label={t("Rename conversation")}
           onClick={() => {
-            const title = win.prompt(
+            const title = uiWindow().prompt(
               t("Conversation title"),
               snapshot.active?.title || "",
             );
@@ -181,137 +227,162 @@ export function ChatApp({
                 )}
               </div>
             )}
-            {snapshot.active?.messages.map((message) => (
-              <div
-                key={message.id}
-                className={`zaichat-message ${message.error ? "zaichat-error" : ""}`}
-                data-role={message.role}
-              >
-                <div className="zaichat-message-bubble">
-                  <div className="zaichat-message-label">
-                    {message.role === "user" ? t("你") : "ZaiChat"}
-                  </div>
-                  {message.role === "assistant" ? (
-                    <MessageText
-                      text={message.displayText}
-                      sources={message.sourceRefs}
-                      onSource={(source) => {
-                        const element = shellRef.current?.ownerDocument?.getElementById(
-                          `evidence-${message.id}-${source.sourceID}`,
-                        );
-                        if (!element || !source.snippet) {
-                          onLocate(source);
-                          return;
-                        }
-                        const details = element.closest("details");
-                        if (details) details.setAttribute("open", "");
-                        element.scrollIntoView({ block: "center" });
-                        (element as HTMLElement).focus();
-                      }}
-                    />
-                  ) : (
-                    <div>{message.displayText}</div>
-                  )}
-                </div>
-                {Boolean(message.evidenceCoverage?.length) && (
-                  <details>
-                    <summary>{t("本轮全文读取范围（插件记录）")}</summary>
-                    {groupSources(message.evidenceCoverage || []).map((sources) => (
-                      <p
-                        key={`${sources[0].item.libraryID}:${sources[0].item.itemKey}`}
-                      >
-                        {sources[0].label}:{" "}
-                        {[
-                          ...new Set(
-                            sources
-                              .map((source) => evidenceCoverage(source, t))
-                              .filter(Boolean),
-                          ),
-                        ].join("；")}
-                      </p>
-                    ))}
-                  </details>
-                )}
-                {message.sourceRefs?.length ? (
-                  <div className="zaichat-sources">
-                    {groupSources(message.sourceRefs).map((sources) => (
-                      <SourceCard
-                        key={`${sources[0].item.libraryID}:${sources[0].item.itemKey}`}
-                        source={sources[0]}
-                        sources={sources}
-                        allSources={message.sourceRefs}
-                        anchorPrefix={`evidence-${message.id}-`}
-                        onLocate={onLocate}
-                        onOpen={onOpen}
+            {snapshot.active?.messages
+              .filter(
+                (message) =>
+                  !snapshot.question || message.questionID !== snapshot.question.id,
+              )
+              .map((message) => (
+                <div
+                  key={message.id}
+                  className={`zaichat-message ${message.error ? "zaichat-error" : ""}`}
+                  data-role={message.role}
+                >
+                  <div className="zaichat-message-bubble">
+                    <div className="zaichat-message-label">
+                      {message.role === "user" ? t("你") : "ZaiChat"}
+                      {message.delivery && (
+                        <span
+                          className="zaichat-delivery"
+                          data-delivery={message.delivery}
+                        >
+                          {t(
+                            message.delivery === "pending"
+                              ? "Guidance pending"
+                              : message.delivery === "applied"
+                                ? "Guidance applied"
+                                : "Not applied; resend if needed",
+                          )}
+                        </span>
+                      )}
+                    </div>
+                    {message.role === "assistant" ? (
+                      <MessageText
+                        text={message.displayText}
+                        sources={message.sourceRefs}
+                        onSource={(source) => {
+                          const element =
+                            shellRef.current?.ownerDocument?.getElementById(
+                              `evidence-${message.id}-${source.sourceID}`,
+                            );
+                          if (!element || !source.snippet) {
+                            onLocate(source);
+                            return;
+                          }
+                          const details = element.closest("details");
+                          if (details) details.setAttribute("open", "");
+                          element.scrollIntoView({ block: "center" });
+                          (element as HTMLElement).focus();
+                        }}
                       />
-                    ))}
+                    ) : (
+                      <div>{message.displayText}</div>
+                    )}
                   </div>
-                ) : null}
-                {message.agentEvents?.some(
-                  (event) => !["diagnostic", "provider-reasoning"].includes(event.type),
-                ) ? (
-                  <details className="zaichat-agent-events">
-                    <summary>
-                      {
-                        message.agentEvents.filter(
-                          (event) =>
-                            !["diagnostic", "provider-reasoning"].includes(event.type),
-                        ).length
-                      }{" "}
-                      {t("agent events")}
-                    </summary>
-                    <button
-                      className="zaichat-copy-events"
-                      onClick={() =>
-                        void copyText(
-                          win,
-                          compactAgentEvents(
-                            (message.agentEvents || []).filter(
-                              (event) =>
-                                !["diagnostic", "provider-reasoning"].includes(
-                                  event.type,
-                                ),
+                  {Boolean(message.evidenceCoverage?.length) && (
+                    <details>
+                      <summary>{t("本轮全文读取范围（插件记录）")}</summary>
+                      {groupSources(message.evidenceCoverage || []).map((sources) => (
+                        <p
+                          key={`${sources[0].item.libraryID}:${sources[0].item.itemKey}`}
+                        >
+                          {sources[0].label}:{" "}
+                          {[
+                            ...new Set(
+                              sources
+                                .map((source) => evidenceCoverage(source, t))
+                                .filter(Boolean),
                             ),
-                          )
-                            .map((event) => event.summary)
-                            .join("\n"),
-                        )
-                      }
-                    >
-                      {t("Copy events")}
-                    </button>
-                    <div className="zaichat-agent-event-text">
-                      {compactAgentEvents(
-                        message.agentEvents.filter(
-                          (event) =>
-                            !["diagnostic", "provider-reasoning"].includes(event.type),
-                        ),
-                      ).map((event) => (
-                        <div key={event.id}>{event.summary}</div>
+                          ].join("；")}
+                        </p>
+                      ))}
+                    </details>
+                  )}
+                  {message.sourceRefs?.length ? (
+                    <div className="zaichat-sources">
+                      {groupSources(message.sourceRefs).map((sources) => (
+                        <SourceCard
+                          key={`${sources[0].item.libraryID}:${sources[0].item.itemKey}`}
+                          source={sources[0]}
+                          sources={sources}
+                          allSources={message.sourceRefs}
+                          anchorPrefix={`evidence-${message.id}-`}
+                          onLocate={onLocate}
+                          onOpen={onOpen}
+                        />
                       ))}
                     </div>
-                  </details>
-                ) : null}
-                {getSettings().developerDiagnostics &&
-                message.agentEvents?.some((event) =>
-                  ["diagnostic", "provider-reasoning"].includes(event.type),
-                ) ? (
-                  <DeveloperDiagnostics
-                    win={win}
-                    events={message.agentEvents.filter((event) =>
-                      ["diagnostic", "provider-reasoning"].includes(event.type),
-                    )}
-                  />
-                ) : null}
-                {message.role === "user" && !snapshot.running && (
-                  <div className="zaichat-message-actions">
-                    <button onClick={() => rerun(message.id, message.displayText)}>
-                      {t("编辑并重试")}
-                    </button>
-                  </div>
-                )}
-              </div>
-            ))}
+                  ) : null}
+                  {message.agentEvents?.some(
+                    (event) =>
+                      !["diagnostic", "provider-reasoning"].includes(event.type),
+                  ) ? (
+                    <details className="zaichat-agent-events">
+                      <summary>
+                        {
+                          message.agentEvents.filter(
+                            (event) =>
+                              !["diagnostic", "provider-reasoning"].includes(
+                                event.type,
+                              ),
+                          ).length
+                        }{" "}
+                        {t("agent events")}
+                      </summary>
+                      <button
+                        className="zaichat-copy-events"
+                        onClick={() =>
+                          void copyText(
+                            win,
+                            compactAgentEvents(
+                              (message.agentEvents || []).filter(
+                                (event) =>
+                                  !["diagnostic", "provider-reasoning"].includes(
+                                    event.type,
+                                  ),
+                              ),
+                            )
+                              .map((event) => event.summary)
+                              .join("\n"),
+                          )
+                        }
+                      >
+                        {t("Copy events")}
+                      </button>
+                      <div className="zaichat-agent-event-text">
+                        {compactAgentEvents(
+                          message.agentEvents.filter(
+                            (event) =>
+                              !["diagnostic", "provider-reasoning"].includes(
+                                event.type,
+                              ),
+                          ),
+                        ).map((event) => (
+                          <div key={event.id}>{event.summary}</div>
+                        ))}
+                      </div>
+                    </details>
+                  ) : null}
+                  {getSettings().developerDiagnostics &&
+                  message.agentEvents?.some((event) =>
+                    ["diagnostic", "provider-reasoning"].includes(event.type),
+                  ) ? (
+                    <DeveloperDiagnostics
+                      win={win}
+                      events={message.agentEvents.filter((event) =>
+                        ["diagnostic", "provider-reasoning"].includes(event.type),
+                      )}
+                    />
+                  ) : null}
+                  {message.role === "user" && !snapshot.running && (
+                    <div className="zaichat-message-actions">
+                      <button onClick={() => rerun(message.id, message.displayText)}>
+                        {t("编辑并重试")}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
             {snapshot.streamingText && (
               <div className="zaichat-message" data-role="assistant">
                 <div className="zaichat-message-bubble">
@@ -333,111 +404,308 @@ export function ChatApp({
               ))}
           </div>
 
-          <div className="zaichat-status">
-            <span className="zaichat-status-dot" data-running={snapshot.running} />
-            <span>{t(snapshot.status)}</span>
-            <span className="zaichat-status-model">
-              {profile
-                ? t(
-                    {
-                      auto: "Auto",
-                      "native-tools": "Native tools",
-                      "json-actions": "Strict JSON actions",
-                    }[profile.protocol],
-                  )
-                : t("No model")}
-            </span>
-          </div>
-
-          <div
-            className="zaichat-token-usage"
-            title={t(
-              "本对话保留记录中，已完成请求由提供商报告的输入+输出累计；不是当前上下文大小或账单。旧记录、失败请求及未报告用量的请求可能缺失。",
+          <div className="zaichat-compose-surface">
+            <div className="zaichat-interaction-panels">
+              {activeRun && !snapshot.question && (
+                <RunProgress run={snapshot.active?.lastRun} />
+              )}
+              {snapshot.running && !activeRun && (
+                <div className="zaichat-other-run">
+                  <span>
+                    {t("Another conversation is running; new messages will queue")}
+                  </span>
+                  <button
+                    onClick={() =>
+                      snapshot.runningConversationID &&
+                      manager.selectConversation(snapshot.runningConversationID)
+                    }
+                  >
+                    {t("View running conversation")}
+                  </button>
+                </div>
+              )}
+              {snapshot.question && (
+                <div
+                  className="zaichat-question"
+                  role="region"
+                  aria-label={t("Reply needed")}
+                >
+                  <strong>{t("Reply needed")}</strong>
+                  <p>{snapshot.question.question}</p>
+                  <div className="zaichat-question-choices">
+                    {snapshot.question.choices.map((choice) => (
+                      <button key={choice} onClick={() => void send("steer", choice)}>
+                        {choice}
+                      </button>
+                    ))}
+                  </div>
+                  <small>
+                    {t(
+                      "Choose an option or type your own reply below. No model request is running while waiting.",
+                    )}
+                  </small>
+                </div>
+              )}
+              {Boolean(snapshot.queuedMessages?.length) && (
+                <details className="zaichat-message-queue" open>
+                  <summary>
+                    {t("Queued messages")} · {snapshot.queuedMessages.length}
+                    {snapshot.queuePaused ||
+                    snapshot.queuedMessages.some((entry) => entry.needsReview)
+                      ? ` · ${t("Paused")}`
+                      : ""}
+                  </summary>
+                  {snapshot.queuedMessages.map((entry) => (
+                    <div className="zaichat-queue-entry" key={entry.id}>
+                      <span>{entry.text}</span>
+                      <button
+                        title={t("Edit queued message")}
+                        onClick={() => {
+                          const value = uiWindow().prompt(
+                            t("Edit queued message"),
+                            entry.text,
+                          );
+                          if (value != null) manager.editQueued(entry.id, value);
+                        }}
+                      >
+                        {t("Edit")}
+                      </button>
+                      <button
+                        title={t("Remove queued message")}
+                        onClick={() => manager.removeQueued(entry.id)}
+                      >
+                        {t("Remove")}
+                      </button>
+                    </div>
+                  ))}
+                  {!snapshot.running && (
+                    <button
+                      onClick={() => {
+                        const selectedProfile = getProfile();
+                        if (selectedProfile)
+                          void manager
+                            .resumeQueued(
+                              selectedProfile,
+                              getSettings().systemPrompt,
+                              getSettings(),
+                            )
+                            .catch((error) => uiWindow().alert(String(error)));
+                      }}
+                    >
+                      {t("Resume queue")}
+                    </button>
+                  )}
+                </details>
+              )}
+            </div>
+            {!snapshot.running && (
+              <div className="zaichat-status">
+                <span className="zaichat-status-dot" data-running={snapshot.running} />
+                <span>{t(snapshot.status)}</span>
+                <span className="zaichat-status-model">
+                  {profile
+                    ? t(
+                        {
+                          auto: "Auto",
+                          "native-tools": "Native tools",
+                          "json-actions": "Strict JSON actions",
+                        }[profile.protocol],
+                      )
+                    : t("No model")}
+                </span>
+              </div>
             )}
-          >
-            {usage.reported
-              ? t("Reported {total} tokens (input {input} / output {output})", {
-                  total: usage.totalTokens.toLocaleString(),
-                  input: usage.promptTokens.toLocaleString(),
-                  output: usage.completionTokens.toLocaleString(),
-                })
-              : t("Token 用量：尚无提供商报告")}
-            {usage.missing
-              ? ` · ${t("{count} unreported requests", { count: usage.missing })}`
-              : ""}
-          </div>
-          <div className="zaichat-context-bar">
-            <button
-              className="zaichat-context-button"
-              aria-label={t("Choose context")}
-              onClick={() => setContextOpen(true)}
-            >
-              ＋ {t("Context")}
-              {selectedContext.length ? ` (${selectedContext.length})` : ""}
-            </button>
-            <span className="zaichat-context-summary">
-              {selectedContext.length
-                ? selectedContext.map((entry) => entry.label).join(", ")
-                : t("No explicit context attached")}
-            </span>
-          </div>
 
-          <div className="zaichat-composer">
-            <textarea
-              value={draft}
-              disabled={snapshot.running}
-              placeholder={t("描述你想找的文献，或提出一个问题…")}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void send();
-                }
-              }}
-            />
-            <div className="zaichat-composer-actions">
-              <span className="zaichat-input-hint">
-                {t("Enter 发送 · Shift+Enter 换行")}
-              </span>
-              {snapshot.running ? (
-                <button onClick={() => manager.stop()}>{t("Stop")}</button>
-              ) : (
+            <div className="zaichat-composer-meta">
+              <details
+                className="zaichat-token-usage"
+                title={t(
+                  "本对话保留记录中，已完成请求由提供商报告的输入+输出累计；不是当前上下文大小或账单。旧记录、失败请求及未报告用量的请求可能缺失。",
+                )}
+              >
+                <summary>
+                  {usage.reported
+                    ? t("{count} tokens", { count: usage.totalTokens.toLocaleString() })
+                    : t("Token usage")}
+                </summary>
+                <div>
+                  {usage.reported
+                    ? t("Reported {total} tokens (input {input} / output {output})", {
+                        total: usage.totalTokens.toLocaleString(),
+                        input: usage.promptTokens.toLocaleString(),
+                        output: usage.completionTokens.toLocaleString(),
+                      })
+                    : t("Token 用量：尚无提供商报告")}
+                  {usage.missing
+                    ? ` · ${t("{count} unreported requests", { count: usage.missing })}`
+                    : ""}
+                </div>
+              </details>
+              <div className="zaichat-context-bar">
+                <button
+                  className="zaichat-context-button"
+                  aria-label={t("Choose context")}
+                  onClick={() => setContextOpen(true)}
+                >
+                  ＋ {t("Context")}
+                  {selectedContext.length ? ` (${selectedContext.length})` : ""}
+                </button>
+                {selectedContext.length > 0 && (
+                  <span className="zaichat-context-summary">
+                    {selectedContext.length
+                      ? selectedContext.map((entry) => entry.label).join(", ")
+                      : ""}
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="zaichat-composer">
+              <textarea
+                aria-label={t("Message")}
+                value={draft}
+                placeholder={t(
+                  snapshot.question
+                    ? "Type your reply…"
+                    : activeRun
+                      ? "Add a detail or redirect this task…"
+                      : "描述你想找的文献，或提出一个问题…",
+                )}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (
+                    event.key === "Enter" &&
+                    !event.shiftKey &&
+                    !event.nativeEvent.isComposing &&
+                    event.keyCode !== 229
+                  ) {
+                    event.preventDefault();
+                    void send(
+                      snapshot.running && (event.ctrlKey || event.metaKey)
+                        ? "queue"
+                        : followUpMode,
+                    );
+                  }
+                }}
+              />
+              <div className="zaichat-composer-actions">
+                <span className="zaichat-input-hint">
+                  {t(
+                    activeRun && !snapshot.question
+                      ? "Enter uses selected mode · Ctrl/Cmd+Enter queues"
+                      : "Enter 发送 · Shift+Enter 换行",
+                  )}
+                </span>
+                {snapshot.running && (
+                  <button
+                    className="zaichat-stop-button"
+                    onClick={() => manager.stop()}
+                  >
+                    {t("Stop")}
+                  </button>
+                )}
+                {activeRun && !snapshot.question && (
+                  <SelectMenu
+                    label={t("Follow-up behavior")}
+                    value={followUpMode}
+                    options={[
+                      { value: "steer", label: t("Steer this task") },
+                      { value: "queue", label: t("Queue next message") },
+                    ]}
+                    onChange={(value) => setFollowUpMode(value as "steer" | "queue")}
+                  />
+                )}
                 <button
                   className="zaichat-send-button zaichat-primary-button"
                   disabled={!draft.trim()}
                   onClick={() => void send()}
                 >
-                  {t("Send")} ↑
+                  {t(
+                    snapshot.question
+                      ? "Reply"
+                      : activeRun
+                        ? followUpMode === "steer"
+                          ? "Steer"
+                          : "Queue"
+                        : snapshot.running
+                          ? "Queue"
+                          : "Send",
+                  )}{" "}
+                  ↑
                 </button>
-              )}
-              {!snapshot.running &&
-              snapshot.active?.messages.some((message) => message.role === "user") ? (
-                <button
-                  className="zaichat-icon-button"
-                  title={t("Regenerate")}
-                  aria-label={t("Regenerate")}
-                  onClick={() => {
-                    const selectedProfile = getProfile();
-                    if (selectedProfile)
-                      void manager.regenerate(
-                        selectedContext,
-                        selectedProfile,
-                        getSettings().systemPrompt,
-                        getSettings(),
-                      );
-                  }}
-                >
-                  ↻
-                </button>
-              ) : null}
+                {!snapshot.running &&
+                snapshot.active?.messages.some((message) => message.role === "user") ? (
+                  <button
+                    className="zaichat-icon-button"
+                    title={t("Regenerate")}
+                    aria-label={t("Regenerate")}
+                    onClick={() => {
+                      const selectedProfile = getProfile();
+                      if (selectedProfile)
+                        void manager.regenerate(
+                          selectedContext,
+                          selectedProfile,
+                          getSettings().systemPrompt,
+                          getSettings(),
+                        );
+                    }}
+                  >
+                    ↻
+                  </button>
+                ) : null}
+              </div>
             </div>
           </div>
         </div>
       </div>
 
+      {editing && (
+        <div
+          className="zaichat-dialog-backdrop"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.stopPropagation();
+              setEditing(undefined);
+            }
+          }}
+        >
+          <div
+            className="zaichat-dialog zaichat-edit-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("Edit message")}
+          >
+            <div className="zaichat-dialog-header">
+              <strong>{t("Edit message")}</strong>
+              <button aria-label={t("关闭")} onClick={() => setEditing(undefined)}>
+                ×
+              </button>
+            </div>
+            <textarea
+              ref={editRef}
+              aria-label={t("Edit message")}
+              value={editing.text}
+              onChange={(event) => setEditing({ ...editing, text: event.target.value })}
+            />
+            {editError && <p role="alert">{editError}</p>}
+            <div className="zaichat-dialog-actions">
+              <button onClick={() => setEditing(undefined)}>{t("Cancel")}</button>
+              <button
+                className="zaichat-primary-button"
+                disabled={!editing.text.trim() || snapshot.running}
+                onClick={() => void submitEdit()}
+              >
+                {t("Edit & rerun")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {modelOpen && profile && loadModels && onSelectModel && (
         <ModelPicker
           profile={profile}
+          profiles={getProfiles?.()}
+          defaultProfileID={getDefaultProfileID?.()}
+          onOpenSettings={onOpenSettings}
           loadModels={loadModels}
           onSave={onSelectModel}
           onClose={() => setModelOpen(false)}
@@ -483,10 +751,21 @@ export function ChatApp({
                       setHistoryOpen(false);
                     }}
                   >
-                    {conversation.unreadable ? "⚠ " : ""}
-                    {conversation.title === "New chat"
-                      ? t("New chat")
-                      : conversation.title}
+                    <span className="zaichat-history-title">
+                      {conversation.unreadable ? "⚠ " : ""}
+                      {conversation.title === "New chat"
+                        ? t("New chat")
+                        : conversation.title}
+                    </span>
+                    <time dateTime={conversation.updatedAt}>
+                      {new Date(conversation.updatedAt).toLocaleString(undefined, {
+                        year: "numeric",
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </time>
                   </button>
                   <button
                     className="zaichat-history-delete"
@@ -494,7 +773,7 @@ export function ChatApp({
                     title={t("Delete conversation")}
                     onClick={async () => {
                       if (
-                        win.confirm(
+                        uiWindow().confirm(
                           t("Delete conversation “{title}”?", {
                             title: conversation.title,
                           }),

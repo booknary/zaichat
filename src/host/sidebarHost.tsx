@@ -26,6 +26,7 @@ export class SidebarHost {
   private popup?: Window;
   private unsubscribe?: () => void;
   private mode = "sidebar";
+  private selectedProfileID?: string;
   private disposed = false;
   constructor(
     private readonly win: _ZoteroTypes.MainWindow,
@@ -77,22 +78,34 @@ export class SidebarHost {
           <ChatApp
             manager={this.manager}
             window={this.win}
-            getProfile={this.getProfile}
-            loadModels={() => {
-              const profile = this.getProfile();
+            getProfile={() =>
+              readModelProfiles().find(
+                (entry) => entry.id === this.selectedProfileID,
+              ) || this.getProfile()
+            }
+            getDefaultProfileID={() => String(getPref("defaultModelProfileID") || "")}
+            getProfiles={readModelProfiles}
+            loadModels={(selected) => {
+              const profile = selected || this.getProfile();
               if (!profile) throw new Error(t("请先在设置页配置提供商。"));
               return fetchModelCatalog(profile.baseURL, profile.apiKey);
             }}
             onSelectModel={(selection) => {
               if (this.manager.getSnapshot().running)
                 throw new Error(t("请等待当前回答完成后切换模型。"));
-              const profile = this.getProfile();
+              const { profileID, makeDefault, ...modelSettings } = selection;
+              const profile = profileID
+                ? readModelProfiles().find((entry) => entry.id === profileID)
+                : this.getProfile();
               if (!profile) throw new Error(t("请先配置提供商。"));
               writeModelProfiles(
                 readModelProfiles().map((entry) =>
-                  entry.id === profile.id ? { ...entry, ...selection } : entry,
+                  entry.id === profile.id ? { ...entry, ...modelSettings } : entry,
                 ),
               );
+              this.selectedProfileID = profile.id;
+              if (makeDefault) setPref("defaultModelProfileID", profile.id);
+              this.manager.settingsChanged();
             }}
             getSettings={this.getSettings}
             onExport={this.onExport}

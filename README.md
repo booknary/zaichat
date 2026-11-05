@@ -6,10 +6,10 @@ A conversational assistant for your **local Zotero library**: find papers from
 imperfect descriptions, ask evidence-grounded questions, compare abstracts, and
 read selected passages without uploading your entire library.
 
-**Current release: 0.8.0-beta.46 · Zotero 9–10.0 · Windows x64 CPU semantic runtime.**
+**Current release: 0.8.0-beta.51 · Zotero 9–10.0 · Windows x64 CPU semantic runtime.**
 
-[Download the XPI](https://github.com/booknary/zaichat/releases/download/v0.8.0-beta.46/zaichat-0.8.0-beta.46.xpi)
-· [Release notes](https://github.com/booknary/zaichat/releases/tag/v0.8.0-beta.46)
+[Download the XPI](https://github.com/booknary/zaichat/releases/download/v0.8.0-beta.51/zaichat-0.8.0-beta.51.xpi)
+· [Release notes](https://github.com/booknary/zaichat/releases/tag/v0.8.0-beta.51)
 
 ## See it in Zotero
 
@@ -45,7 +45,7 @@ the plugin's English and Chinese presentation is tested independently._
 
 ## Install and configure
 
-1. Download **`zaichat-0.8.0-beta.46.xpi`** from the Release. Do not install the
+1. Download **`zaichat-0.8.0-beta.51.xpi`** from the Release. Do not install the
    automatically generated source-code ZIP as a plugin.
 2. In Zotero, open **Tools → Plugins** (the wording may vary by locale), choose
    **Install Plugin From File…**, and select the XPI. Restart if Zotero requests it.
@@ -55,7 +55,9 @@ the plugin's English and Chinese presentation is tested independently._
 4. Open ZaiChat from its toolbar button, Tools menu, item context menu, or
    **Ctrl/Cmd+Shift+J**. A configured provider is needed for model answers.
 
-The API is `/chat/completions` compatible (not the OpenAI Responses API).
+This release supports Chat Completions and platform
+profiles for DeepSeek, Volcano Ark, Bailian and OpenAI, including Responses routing
+for OpenAI reasoning models. See [provider setup and limitations](docs/provider-compatibility.md).
 ![Model and reasoning controls](docs/screenshots/en-model.png)
 
 Examples include compatible OpenAI/OpenRouter/DeepSeek endpoints and local

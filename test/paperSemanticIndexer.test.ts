@@ -80,6 +80,21 @@ describe("PaperSemanticIndexer", () => {
     expect(progress.some((value) => value.state === "running")).toBe(true);
   });
 
+  it("restores distinct paper counts without embedding or confusing vectors and library keys", async () => {
+    const first = createIndexer();
+    await first.rebuild();
+    await coordinator.indexPaper({ ...paper("ABCD1234"), libraryID: 2 });
+    embedder.inputs = [];
+    const restarted = createIndexer();
+    expect(await restarted.initialize()).toMatchObject({
+      state: "completed",
+      completedItems: 3,
+      totalItems: 3,
+      vectorCount: 9,
+    });
+    expect(embedder.inputs).toEqual([]);
+  });
+
   it("cancels a paused rebuild without replacing the active generation", async () => {
     const first = createIndexer();
     const oldActive = await first.rebuild();
@@ -132,12 +147,22 @@ describe("PaperSemanticIndexer", () => {
     await notifier.flush();
     expect(embedder.inputs).toEqual(["Title: A changed title"]);
 
+    expect(indexer.getProgress()).toMatchObject({
+      completedItems: 3,
+      totalItems: 3,
+      vectorCount: 9,
+    });
     provider.remove(added.itemKey);
     await notifier.notify("delete", "item", [42], {
       42: { libraryID: 1, key: added.itemKey },
     });
     await notifier.flush();
     active = await store.getActiveGeneration("paper");
+    expect(indexer.getProgress()).toMatchObject({
+      completedItems: 2,
+      totalItems: 2,
+      vectorCount: 6,
+    });
     expect(
       await store.listSourceRecords(active!.generationID, 1, added.itemKey),
     ).toEqual([]);
@@ -209,8 +234,17 @@ describe("PaperSemanticIndexer", () => {
     provider.put(paper("NEWP1234"));
     embedder.inputs = [];
     const restarted = createIndexer();
-    await restarted.initialize();
+    expect(await restarted.initialize()).toMatchObject({
+      completedItems: 2,
+      totalItems: 2,
+      vectorCount: 6,
+    });
     const active = await restarted.ensureInitialIndex();
+    expect(restarted.getProgress()).toMatchObject({
+      completedItems: 2,
+      totalItems: 2,
+      vectorCount: 6,
+    });
     expect(active.generationID).toBe(generation.generationID);
     expect(embedder.inputs).toHaveLength(3);
     expect(embedder.inputs.join(" ")).toContain("NEWP1234");

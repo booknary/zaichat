@@ -1,5 +1,9 @@
 import { ModelProfile } from "../core/types";
-import { OpenAICompatibleProvider, ProviderMessage } from "./modelProvider";
+import {
+  OpenAICompatibleProvider,
+  ProviderMessage,
+  describeModelProviderError,
+} from "./modelProvider";
 import { resolveProviderCapabilities } from "./providerCapabilities";
 
 export interface ProviderProbeCheck {
@@ -19,12 +23,17 @@ export async function probeProviderCapabilities(
     () => controller.abort("provider capability test timed out"),
     Math.min(90_000, Math.max(15_000, profile.timeoutMs)),
   );
-  const basicProfile = {
+  // Exercise native tools without auto-fallback, unless JSON actions were explicitly selected.
+  const toolProfile = {
     ...profile,
-    protocol: "native-tools" as const,
-    streaming: false,
-    reasoningEnabled: false,
+    protocol:
+      profile.protocol === "json-actions"
+        ? ("json-actions" as const)
+        : ("native-tools" as const),
   };
+  const basicProfile = { ...toolProfile, reasoningEnabled: false };
+  const thinking = capabilities.supportsThinking && profile.reasoningEnabled;
+  const maxTokens = capabilities.supportsThinking ? 2048 : 128;
   try {
     await check(checks, "API", async () => {
       const response = await provider.complete(
@@ -33,46 +42,28 @@ export async function probeProviderCapabilities(
         [],
         controller.signal,
         undefined,
-        { stage: "final-synthesis", maxTokens: 64 },
+        { stage: "final-synthesis", maxTokens },
       );
-      if (!response.text.trim()) throw new Error("empty completion");
+      if (!response.text.trim()) throw new Error("Empty completion");
     });
-
-    if (capabilities.id !== "official-deepseek-v4") {
-      checks.push(
-        {
-          name: "DeepSeek thinking",
-          status: "SKIP",
-          detail: capabilities.detectionReason,
-        },
-        {
-          name: "DeepSeek tool round-trip",
-          status: "SKIP",
-          detail: "Provider-specific probe is only enabled for official DeepSeek V4",
-        },
-      );
-      return checks;
+    if (thinking) {
+      await check(checks, "Thinking", async () => {
+        const response = await provider.complete(
+          toolProfile,
+          [{ role: "user", content: "Think briefly, then reply with exactly OK." }],
+          [],
+          controller.signal,
+          undefined,
+          { stage: "final-synthesis", maxTokens },
+        );
+        if (!response.text.trim()) throw new Error("Empty completion");
+        if (
+          capabilities.thinkingParameter !== "reasoning-effort" &&
+          !response.reasoningContent
+        )
+          throw new Error("No reasoning content returned; check model support");
+      });
     }
-
-    const thinkingProfile = {
-      ...basicProfile,
-      reasoningEnabled: true,
-      reasoningEffort: "high" as const,
-    };
-    await check(checks, "Thinking", async () => {
-      const response = await provider.complete(
-        thinkingProfile,
-        [{ role: "user", content: "Think briefly, then reply with exactly OK." }],
-        [],
-        controller.signal,
-        undefined,
-        { stage: "final-synthesis", maxTokens: 256 },
-      );
-      if (!response.text.trim()) throw new Error("empty final content");
-      if (!response.reasoningContent)
-        throw new Error("reasoning_content was not returned");
-    });
-
     const dummyTools = [
       {
         type: "function",
@@ -90,84 +81,73 @@ export async function probeProviderCapabilities(
       },
     ];
     let toolMessages: ProviderMessage[] | undefined;
-    await check(checks, "Tool calls", async () => {
-      const initial: ProviderMessage[] = [
-        {
-          role: "system",
-          content:
-            "This is a harmless provider capability test. Call diagnostic_echo exactly once with value=probe, then use its result.",
-        },
-        { role: "user", content: "Run the diagnostic tool now." },
-      ];
-      const response = await provider.complete(
-        thinkingProfile,
-        initial,
-        dummyTools,
-        controller.signal,
-        undefined,
-        { stage: "tool-routing", maxTokens: 256 },
-      );
-      const tool = response.toolCalls.find((call) => call.name === "diagnostic_echo");
-      if (!tool) throw new Error("model did not call diagnostic_echo");
-      if (!response.reasoningContent)
-        throw new Error("tool-call response omitted reasoning_content");
-      toolMessages = [
-        ...initial,
-        { ...response.assistantMessage, protocolRequired: true },
-        {
-          role: "tool",
-          tool_call_id: tool.id,
-          content: JSON.stringify({ echoed: "probe" }),
-          protocolRequired: true,
-        },
-      ];
-    });
-
+    await check(
+      checks,
+      toolProfile.protocol === "json-actions" ? "JSON actions" : "Tool calls",
+      async () => {
+        const initial: ProviderMessage[] = [
+          {
+            role: "system",
+            content:
+              "This is a harmless provider capability test. Call diagnostic_echo exactly once with value=probe, then use its result. After receiving the tool result, reply with OK without calling another tool.",
+          },
+          { role: "user", content: "Run the diagnostic tool now." },
+        ];
+        const response = await provider.complete(
+          toolProfile,
+          initial,
+          dummyTools,
+          controller.signal,
+          undefined,
+          { stage: "tool-routing", maxTokens },
+        );
+        const tool = response.toolCalls[0];
+        if (
+          response.toolCalls.length !== 1 ||
+          tool?.name !== "diagnostic_echo" ||
+          !tool.arguments ||
+          typeof tool.arguments !== "object" ||
+          !("value" in tool.arguments) ||
+          tool.arguments.value !== "probe"
+        )
+          throw new Error("Expected exactly one diagnostic_echo call with value=probe");
+        if (
+          thinking &&
+          capabilities.requiresReasoningContentForToolCalls &&
+          typeof response.assistantMessage.reasoning_content !== "string"
+        )
+          throw new Error("Tool history is missing reasoning_content");
+        toolMessages = [
+          ...initial,
+          { ...response.assistantMessage, protocolRequired: true },
+          {
+            role: "tool",
+            tool_call_id: tool.id,
+            content: JSON.stringify({ echoed: "probe" }),
+            protocolRequired: true,
+          },
+        ];
+      },
+    );
     if (toolMessages) {
       await check(checks, "Tool round-trip", async () => {
         const response = await provider.complete(
-          thinkingProfile,
+          toolProfile,
           toolMessages!,
           dummyTools,
           controller.signal,
           undefined,
-          { stage: "final-synthesis", maxTokens: 256 },
+          { stage: "final-synthesis", maxTokens },
         );
-        if (!response.text.trim() && response.toolCalls.length)
-          throw new Error("model repeated the dummy tool instead of completing");
-        if (!response.text.trim()) throw new Error("empty post-tool response");
+        if (response.toolCalls.length)
+          throw new Error("Model repeated the diagnostic tool instead of completing");
+        if (!response.text.trim()) throw new Error("Empty post-tool response");
       });
     } else {
       checks.push({
         name: "Tool round-trip",
         status: "SKIP",
-        detail: "Initial native tool call failed",
-      });
-    }
-
-    if (profile.streaming) {
-      await check(checks, "Streaming reasoning", async () => {
-        let reasoningDelta = "";
-        const response = await provider.complete(
-          { ...thinkingProfile, streaming: true },
-          [{ role: "user", content: "Think briefly, then reply with OK." }],
-          [],
-          controller.signal,
-          undefined,
-          {
-            stage: "final-synthesis",
-            maxTokens: 256,
-            onReasoningDelta: (delta) => (reasoningDelta += delta),
-          },
-        );
-        if (!reasoningDelta || reasoningDelta !== response.reasoningContent)
-          throw new Error("streamed reasoning deltas were not preserved");
-      });
-    } else {
-      checks.push({
-        name: "Streaming reasoning",
-        status: "SKIP",
-        detail: "Streaming is disabled in this profile",
+        detail: "Initial tool call failed",
       });
     }
     return checks;
@@ -185,10 +165,6 @@ async function check(
     await action();
     checks.push({ name, status: "PASS" });
   } catch (error) {
-    checks.push({
-      name,
-      status: "FAIL",
-      detail: error instanceof Error ? error.message : String(error),
-    });
+    checks.push({ name, status: "FAIL", detail: describeModelProviderError(error) });
   }
 }

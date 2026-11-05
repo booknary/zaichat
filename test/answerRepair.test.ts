@@ -318,3 +318,71 @@ it("does not confuse a missing method in a resolved paper with a missing library
   ).toBe(true);
   expect((await finish(`库中没有任何类似研究 [${source.sourceID}]`)).ok).toBe(false);
 });
+
+it("accepts facts-only correction with no repair wrapper, and never reuses completed drafts", async () => {
+  const registry = new ToolRegistry({} as any);
+  (registry as any).sourceWhitelist.set(source.sourceID, source);
+  const ctx: any = { userQuery: "Methods?", evidenceBudget: { remainingChars: 60000 } };
+  const finish = (args: any) =>
+    registry.execute({ id: "f", name: "finish_answer", arguments: args }, ctx);
+  const base = { sourceIDs: [source.sourceID], evidenceInsufficient: false };
+  expect((await finish({ ...base, evidenceFacts: [fact] })).ok).toBe(false);
+  expect(
+    (
+      await finish({
+        ...base,
+        answer: "Toolkit was used [src-current-analysis].",
+        evidenceFacts: [{ ...fact, quote: "Fabricated method and parameters." }],
+      })
+    ).ok,
+  ).toBe(false);
+  expect((await finish({ ...base, evidenceFacts: [fact] })).ok).toBe(true);
+  expect((await finish({ ...base, evidenceFacts: [fact] })).ok).toBe(false);
+});
+
+it("normalizes fact IDs consistently and distinguishes ID errors from real quote mismatches", async () => {
+  const registry = new ToolRegistry({} as any);
+  (registry as any).sourceWhitelist.set(source.sourceID, source);
+  const ctx: any = { userQuery: "Methods?", evidenceBudget: { remainingChars: 60000 } };
+  const finish = (args: any) =>
+    registry.execute({ id: "f", name: "finish_answer", arguments: args }, ctx);
+  const input = {
+    answer: "Toolkit was used [src-current-analys].",
+    sourceIDs: ["src-current-analys"],
+    evidenceInsufficient: false,
+    evidenceFacts: [{ ...fact, sourceID: "src-current-analys" }],
+  };
+  expect((await finish(input)).ok).toBe(true);
+  expect(input.evidenceFacts[0].sourceID).toBe("src-current-analys");
+  const badQuote = await finish({
+    ...input,
+    evidenceFacts: [
+      { ...input.evidenceFacts[0], quote: "Fabricated method and parameters." },
+    ],
+  });
+  expect((badQuote.content as any).issues[0].code).toBe("quote-mismatch");
+  (registry as any).sourceWhitelist.set("src-current-analysis-other", {
+    ...source,
+    sourceID: "src-current-analysis-other",
+  });
+  const ambiguous = await finish({
+    ...input,
+    answer: "Toolkit was used [src-current-analysis].",
+    sourceIDs: [source.sourceID],
+  });
+  expect((ambiguous.content as any).issues[0].code).toBe("ambiguous-source-id");
+  const unknown = await finish({
+    ...input,
+    answer: "Toolkit was used [src-current-analysis].",
+    sourceIDs: [source.sourceID],
+    evidenceFacts: [{ ...fact, sourceID: "src-unknown123" }],
+  });
+  expect((unknown.content as any).issues[0].code).toBe("unknown-source-id");
+  const uncited = await finish({
+    ...input,
+    answer: "Toolkit was used [src-current-analysis].",
+    sourceIDs: [source.sourceID],
+    evidenceFacts: [{ ...fact, sourceID: "src-current-analysis-other" }],
+  });
+  expect((uncited.content as any).issues[0].code).toBe("uncited-source-id");
+});

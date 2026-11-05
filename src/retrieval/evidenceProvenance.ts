@@ -5,30 +5,44 @@ export function classifyPassage(
   start: number,
   end: number,
 ): PassageProvenance {
-  // Heuristics, not PDF structure parsing. Only explicit section headings carry
-  // high confidence; an undetected section remains unknown, not "methods".
-  const headings = [
-    ...text
-      .slice(0, end)
-      .matchAll(
-        /(?:^|\n)\s*(?:(?:\d+(?:\.\d+)*[.)]?|[IVX]+\.)\s+)?(materials\s+and\s+methods|methods|experimental\s+procedures|results(?:\s+and\s+discussion)?|discussion|references(?:\s+and\s+notes)?|bibliography|参考文献|材料与方法|研究方法|结果|讨论)\s*[:：]?\s*(?=\n|$)/gimu,
-      ),
-  ];
-  const heading = headings.at(-1);
-  if (heading && heading.index! <= start) {
-    const label = heading[1].toLowerCase();
-    return {
+  // Section labels are extraction heuristics, not proof of a claim. Explicit
+  // post-reference boundaries must end a bibliography, even for unknown sections.
+  const prefix = text.slice(0, end);
+  const boundaries: Array<{ index: number; section: PassageProvenance["section"] }> =
+    [];
+  for (const match of prefix.matchAll(
+    /(?:^|\n)[\t ]*(?:(?:\d+(?:\.\d+)*[.)]?|[IVX]+\.)[\t ]+)?((?:(?:supplementary|supplemental)[\t ]+)?(?:materials[\t ]+and[\t ]+methods|methods|experimental[\t ]+procedures)|results(?:[\t ]+and[\t ]+discussion)?|discussion|references(?:[\t ]+and[\t ]+notes)?|bibliography|reporting[\t ]+summary|data[\t ]+availability|code[\t ]+availability|acknowledg(?:e)?ments|author[\t ]+contributions|competing[\t ]+interests|additional[\t ]+information|supplementary[\t ]+information|software[\t ]+and[\t ]+code|参考文献|材料与方法|研究方法|结果|讨论|致谢|补充材料)[\t ]*[:：]?[\t ]*\r?(?=\n|$)/gimu,
+  )) {
+    const label = match[1].toLowerCase();
+    boundaries.push({
+      index: match.index!,
       section: /references|bibliography|参考文献/u.test(label)
         ? "references"
         : /methods|procedures|方法/u.test(label)
           ? "methods"
           : /results|结果/u.test(label)
             ? "results"
-            : "discussion",
-      basis: "heading",
-      confidence: "high",
-    };
+            : /discussion|讨论/u.test(label)
+              ? "discussion"
+              : "unknown",
+    });
   }
+  // Captions can start on the same line as their title and continue for many lines.
+  for (const match of prefix.matchAll(
+    /(?:^|\n)[\t ]*((?:(?:extended[\t ]+data|supplementary|supplemental)[\t ]+)?(?:fig(?:ure)?s?\.?|tables?))[\t ]*S?\d+[a-z]?[\t ]*(?:[|.:：–—]|(?=\n|$))/gimu,
+  )) {
+    boundaries.push({
+      index: match.index!,
+      section: /fig/iu.test(match[1]) ? "figure-legend" : "unknown",
+    });
+  }
+  const heading = boundaries.sort((a, b) => a.index - b.index).at(-1);
+  if (heading && heading.index <= start)
+    return {
+      section: heading.section,
+      basis: "heading",
+      confidence: heading.section === "unknown" ? "low" : "high",
+    };
   const excerpt = text.slice(start, end);
   if ((excerpt.match(/(?:^|\s)\d{1,3}\.\s+[A-Z][\p{L}'’-]+,/gu) || []).length >= 2)
     return {

@@ -25,6 +25,7 @@ export class PaperSemanticIndexer {
   private pauseRequested = false;
   private cancelRequested = false;
   private shutdownRequested = false;
+  private reconcilingStartup = false;
   private pauseAcknowledged?: () => void;
   private resumeRun?: () => void;
   private readonly deferredRefs = new Map<string, PaperSemanticRef>();
@@ -74,12 +75,15 @@ export class PaperSemanticIndexer {
       );
     }
     const active = await this.store.getActiveGeneration(PAPER_NAMESPACE);
+    const itemCount = active
+      ? (await this.store.listIndexedSources(active.generationID)).length
+      : 0;
     this.setProgress({
       state:
         active?.model.fingerprint === this.model.fingerprint ? "completed" : "idle",
       generationID: active?.generationID,
-      totalItems: 0,
-      completedItems: 0,
+      totalItems: itemCount,
+      completedItems: itemCount,
       vectorCount: active?.recordCount || 0,
       recovered: false,
     });
@@ -101,12 +105,17 @@ export class PaperSemanticIndexer {
     if (active?.model.fingerprint === this.model.fingerprint) {
       // Notifications cannot cover edits made while the plugin was stopped.
       // Reconcile metadata hashes on startup without rebuilding the generation.
-      for (const ref of await this.sourceProvider.listPaperRefs()) {
-        if (this.shutdownRequested) return active;
-        await this.synchronizePaper(ref);
-        await this.yieldControl();
+      this.reconcilingStartup = true;
+      try {
+        for (const ref of await this.sourceProvider.listPaperRefs()) {
+          if (this.shutdownRequested) return active;
+          await this.synchronizePaper(ref);
+          await this.yieldControl();
+        }
+        if (!this.shutdownRequested) await this.requestDeleteReconciliation();
+      } finally {
+        this.reconcilingStartup = false;
       }
-      if (!this.shutdownRequested) await this.requestDeleteReconciliation();
       return active;
     }
     if (this.currentJob) {
@@ -211,6 +220,12 @@ export class PaperSemanticIndexer {
     const source = await this.sourceProvider.getPaper(ref.libraryID, ref.itemKey);
     if (source) await this.coordinator.indexPaper(source);
     else await this.coordinator.deletePaper(ref.libraryID, ref.itemKey);
+    if (
+      !this.reconcilingStartup &&
+      (!this.currentJob ||
+        ["completed", "cancelled", "failed"].includes(this.progress.state))
+    )
+      await this.refreshActiveProgress();
   }
 
   async reconcileDeletedPapers(): Promise<number> {
@@ -222,7 +237,22 @@ export class PaperSemanticIndexer {
       deleted += await this.coordinator.deletePaper(ref.libraryID, ref.itemKey);
       await this.yieldControl();
     }
+    await this.refreshActiveProgress();
     return deleted;
+  }
+
+  private async refreshActiveProgress(finishing = false): Promise<void> {
+    const active = await this.store.getActiveGeneration(PAPER_NAMESPACE);
+    if (!active || (this.runPromise && !finishing) || this.progress.state === "paused")
+      return;
+    const count = (await this.store.listIndexedSources(active.generationID)).length;
+    this.setProgress({
+      ...this.progress,
+      generationID: active.generationID,
+      completedItems: count,
+      totalItems: count,
+      vectorCount: active.recordCount,
+    });
   }
 
   private startRun(
@@ -287,16 +317,20 @@ export class PaperSemanticIndexer {
       const generation = await this.store.activateGeneration(job.generationID);
       job = await this.store.setIndexJobState(job.jobID, "completed");
       this.currentJob = undefined;
+      const indexedCount = (
+        await this.store.listIndexedSources(generation.generationID)
+      ).length;
       this.setProgress({
         state: "completed",
         jobID: job.jobID,
         generationID: generation.generationID,
-        totalItems: job.totalItems,
-        completedItems: job.completedItems,
+        totalItems: indexedCount,
+        completedItems: indexedCount,
         vectorCount: generation.recordCount,
         recovered,
       });
       await this.flushDeferredUpdates();
+      await this.refreshActiveProgress(true);
       return generation;
     } catch (error) {
       if (error instanceof IndexCancelledError) {

@@ -1,3 +1,4 @@
+import { providerPresets } from "../agent/providerPresets";
 import { createID } from "../utils/ids";
 import {
   getPref,
@@ -6,14 +7,17 @@ import {
   writeModelProfiles,
 } from "../utils/prefs";
 import { ModelProfile } from "../core/types";
-import { resolveProviderCapabilities } from "../agent/providerCapabilities";
+import {
+  resolveProviderCapabilities,
+  reasoningModes,
+} from "../agent/providerCapabilities";
 import { probeProviderCapabilities } from "../agent/providerProbe";
 import { SemanticDataStatus } from "../semantic/semanticDataManager";
 import { fetchModelCatalog } from "../agent/modelCatalog";
 import { renderSemanticModelControls } from "./semanticModelControls";
 import { hostMenuText } from "../host/uiLocale";
 
-export function renderPreferences(win: Window): void {
+export function renderPreferences(win: Window, editingID?: string): void {
   const t = hostMenuText();
   const doc = win.document;
   const root = doc.getElementById("zaichat-preferences-root");
@@ -21,8 +25,11 @@ export function renderPreferences(win: Window): void {
   root.replaceChildren();
   const profiles = readModelProfiles();
   const profile =
-    profiles.find((entry) => entry.id === getPref("defaultModelProfileID")) ||
-    profiles[0] ||
+    (editingID === "new"
+      ? undefined
+      : profiles.find(
+          (entry) => entry.id === (editingID || getPref("defaultModelProfileID")),
+        ) || profiles[0]) ||
     ({
       id: createID("model"),
       displayName: "Default",
@@ -38,6 +45,51 @@ export function renderPreferences(win: Window): void {
       evidenceBudgetChars: 60000,
     } as any);
 
+  const profileControls = element(doc, "div", "zaichat-pref-actions");
+  const profileList = element(doc, "select") as HTMLSelectElement;
+  profileList.id = "zaichat-pref-profiles";
+  profileList.setAttribute("aria-label", t("Saved model profiles"));
+  for (const entry of editingID === "new" || !profiles.length
+    ? [...profiles, profile]
+    : profiles) {
+    const option = element(doc, "option") as HTMLOptionElement;
+    option.value = entry.id;
+    option.textContent =
+      entry.displayName +
+      " · " +
+      entry.model +
+      (entry.id === getPref("defaultModelProfileID") ? " · " + t("Default") : "");
+    profileList.append(option);
+  }
+  profileList.value = profile.id;
+  profileList.addEventListener("change", () =>
+    renderPreferences(win, profileList.value),
+  );
+  const addProfile = element(doc, "button") as HTMLButtonElement;
+  addProfile.id = "zaichat-pref-add-profile";
+  addProfile.textContent = t("New model profile");
+  addProfile.addEventListener("click", () => renderPreferences(win, "new"));
+  const defaultProfile = element(doc, "button") as HTMLButtonElement;
+  defaultProfile.id = "zaichat-pref-set-default";
+  defaultProfile.textContent = t(
+    profile.id === getPref("defaultModelProfileID")
+      ? "Default profile"
+      : "Set as default",
+  );
+  defaultProfile.disabled =
+    !profiles.some((entry) => entry.id === profile.id) ||
+    profile.id === getPref("defaultModelProfileID");
+  defaultProfile.addEventListener("click", () => {
+    setPref("defaultModelProfileID", profile.id);
+    defaultProfile.textContent = t("Default profile");
+    defaultProfile.disabled = true;
+    (Zotero as any).ZaiChat?.data?.manager?.settingsChanged();
+  });
+  const profileHint = element(doc, "small");
+  profileHint.textContent = t(
+    "Save before switching profiles. Each profile keeps its own endpoint, key and model.",
+  );
+  profileControls.append(profileList, addProfile, defaultProfile, profileHint);
   const grid = element(doc, "div", "zaichat-pref-grid");
   const displayMode = element(doc, "select") as HTMLSelectElement;
   displayMode.id = "zaichat-display-mode";
@@ -55,6 +107,28 @@ export function renderPreferences(win: Window): void {
     setPref("displayMode", displayMode.value);
     (Zotero as any).ZaiChat?.data?.manager?.settingsChanged();
   });
+  const platform = element(doc, "select") as HTMLSelectElement;
+  platform.id = "zaichat-pref-platform";
+  for (const preset of providerPresets) {
+    const option = element(doc, "option") as HTMLOptionElement;
+    option.value = preset.id;
+    option.textContent = t(preset.label);
+    platform.append(option);
+  }
+  platform.value = profile.provider || "auto";
+  const apiStyle = element(doc, "select") as HTMLSelectElement;
+  apiStyle.id = "zaichat-pref-api-style";
+  for (const [value, label] of [
+    ["auto", "Automatic API"],
+    ["chat-completions", "Chat Completions"],
+    ["responses", "Responses"],
+  ]) {
+    const option = element(doc, "option") as HTMLOptionElement;
+    option.value = value;
+    option.textContent = t(label);
+    apiStyle.append(option);
+  }
+  apiStyle.value = profile.apiStyle || "auto";
   const name = input(doc, "text", profile.displayName);
   const url = input(doc, "url", profile.baseURL);
   url.id = "zaichat-pref-base-url";
@@ -127,31 +201,68 @@ export function renderPreferences(win: Window): void {
   const reasoning = input(doc, "checkbox") as HTMLInputElement;
   reasoning.id = "zaichat-pref-reasoning-enabled";
   reasoning.checked = profile.reasoningEnabled;
+  const reasoningMode = element(doc, "select") as HTMLSelectElement;
+  reasoningMode.id = "zaichat-pref-reasoning-mode";
+  for (const [value, label] of reasoningModes) {
+    const option = element(doc, "option") as HTMLOptionElement;
+    option.value = value;
+    option.textContent = t(label);
+    reasoningMode.append(option);
+  }
+  reasoningMode.value = profile.reasoningMode || "auto";
   const effort = element(doc, "select") as HTMLSelectElement;
   effort.id = "zaichat-pref-reasoning-effort";
   const updateEffortOptions = () => {
     const capabilities = resolveProviderCapabilities({
       baseURL: url.value,
       model: model.value,
+      reasoningMode: reasoningMode.value as ModelProfile["reasoningMode"],
+      provider: platform.value as ModelProfile["provider"],
     });
     const previous = effort.value || profile.reasoningEffort;
     effort.replaceChildren();
-    for (const value of capabilities.reasoningEffortValues) {
+    reasoning.disabled = !capabilities.supportsThinking;
+    effort.disabled = !capabilities.supportsReasoningEffort || !reasoning.checked;
+    for (const value of capabilities.reasoningEffortValues.length
+      ? capabilities.reasoningEffortValues
+      : [["low", "medium", "high", "max"].includes(previous) ? previous : "medium"]) {
       const option = element(doc, "option") as HTMLOptionElement;
       option.value = value;
-      option.textContent = t(value);
+      option.textContent = t(
+        capabilities.supportsReasoningEffort ? value : "Provider default",
+      );
       effort.append(option);
     }
     effort.value = Array.from(effort.options).some(
       (option) => (option as HTMLOptionElement).value === previous,
     )
       ? previous
-      : capabilities.id === "official-deepseek-v4"
+      : capabilities.reasoningEffortValues.includes("high")
         ? "high"
-        : "medium";
+        : capabilities.reasoningEffortValues[0] || "medium";
   };
   url.addEventListener("input", updateEffortOptions);
   model.addEventListener("input", updateEffortOptions);
+  platform.addEventListener("change", () => {
+    const preset = providerPresets.find((entry) => entry.id === platform.value);
+    if (preset?.baseURL) {
+      url.value = preset.baseURL;
+      model.value = preset.model;
+      name.value = t(preset.label);
+      key.value = "";
+      reasoningMode.value = "auto";
+      apiStyle.value = "auto";
+      reasoning.checked = false;
+      invalidateCatalog();
+    }
+    updateEffortOptions();
+  });
+  model.placeholder = t("Enter a model ID or Ark deployment ID");
+  url.title = t(
+    "Use the endpoint for your region/workspace. Platform templates clear the unsaved key; saved profiles remain available.",
+  );
+  reasoningMode.addEventListener("change", updateEffortOptions);
+  reasoning.addEventListener("change", updateEffortOptions);
   updateEffortOptions();
   const system = element(doc, "textarea") as HTMLTextAreaElement;
   system.rows = 5;
@@ -195,11 +306,14 @@ export function renderPreferences(win: Window): void {
   for (const [label, control] of [
     [t("聊天显示方式（立即生效）"), displayMode],
     [t("Profile name"), name],
+    [t("Platform"), platform],
     [t("API base URL"), url],
     [t("API key"), key],
     [t("Model"), modelControls],
+    [t("API type"), apiStyle],
     [t("Protocol"), protocol],
     [t("Streaming"), streaming],
+    [t("Reasoning parameter"), reasoningMode],
     [t("Enable reasoning"), reasoning],
     [t("Reasoning effort"), effort],
     [t("Response / stream idle timeout (seconds)"), requestTimeout],
@@ -229,11 +343,14 @@ export function renderPreferences(win: Window): void {
       const updated = {
         ...profile,
         displayName: name.value,
+        provider: platform.value as ModelProfile["provider"],
+        apiStyle: apiStyle.value as ModelProfile["apiStyle"],
         baseURL: url.value,
         apiKey: key.value,
         model: model.value,
         protocol: protocol.value as any,
         streaming: streaming.checked,
+        reasoningMode: reasoningMode.value as ModelProfile["reasoningMode"],
         reasoningEnabled: reasoning.checked,
         reasoningEffort: effort.value as ModelProfile["reasoningEffort"],
         timeoutMs: Math.max(
@@ -254,7 +371,16 @@ export function renderPreferences(win: Window): void {
           .filter((entry) => entry.id !== updated.id)
           .concat(updated),
       );
-      setPref("defaultModelProfileID", updated.id);
+      if (
+        !readModelProfiles().some(
+          (entry) => entry.id === getPref("defaultModelProfileID"),
+        )
+      )
+        setPref("defaultModelProfileID", updated.id);
+      defaultProfile.disabled = updated.id === getPref("defaultModelProfileID");
+      defaultProfile.textContent = t(
+        defaultProfile.disabled ? "Default profile" : "Set as default",
+      );
       (Zotero as any).ZaiChat?.data?.manager?.settingsChanged();
       setPref("systemPrompt", system.value);
       setPref("maxToolCalls", Math.max(64, Math.min(100, Number(tools.value) || 80)));
@@ -290,10 +416,14 @@ export function renderPreferences(win: Window): void {
       const result = await testModelConnection(
         {
           ...profile,
+          provider: platform.value as ModelProfile["provider"],
+          apiStyle: apiStyle.value as ModelProfile["apiStyle"],
           baseURL: url.value.trim().replace(/\/+$/, ""),
           apiKey: key.value.trim(),
           model: model.value.trim(),
           streaming: streaming.checked,
+          protocol: protocol.value as ModelProfile["protocol"],
+          reasoningMode: reasoningMode.value as ModelProfile["reasoningMode"],
           reasoningEnabled: reasoning.checked,
           reasoningEffort: effort.value as ModelProfile["reasoningEffort"],
         },
@@ -311,7 +441,7 @@ export function renderPreferences(win: Window): void {
   const actions = element(doc, "div", "zaichat-pref-actions");
   actions.append(save, test, status);
   const semantic = renderSemanticControls(win);
-  root.append(grid, disclosure, actions, semantic);
+  root.append(profileControls, grid, disclosure, actions, semantic);
 }
 
 function renderSemanticControls(win: Window): HTMLElement {
@@ -413,11 +543,16 @@ function semanticStatusText(value: SemanticDataStatus): string {
   const t = hostMenuText();
   const progress = value.subsystem.indexing;
   const progressText = progress
-    ? t("{done}/{total} items, {vectors} vectors", {
-        done: progress.completedItems,
-        total: progress.totalItems,
-        vectors: progress.vectorCount,
-      })
+    ? t(
+        progress.state === "completed"
+          ? "{done} indexed items, {vectors} vectors"
+          : "{done}/{total} items, {vectors} vectors",
+        {
+          done: progress.completedItems,
+          total: progress.totalItems,
+          vectors: progress.vectorCount,
+        },
+      )
     : t("not started");
   return [
     `${t("State")}: ${t(value.subsystem.state)}${value.subsystem.failure ? ` — ${value.subsystem.failure}` : ""}`,
@@ -451,7 +586,7 @@ async function testModelConnection(
   return checks
     .map(
       (check) =>
-        `${t(check.name).padEnd(20)} ${t(check.status)}${check.detail ? ` — ${check.detail}` : ""}`,
+        `${t(check.name)}：${t(check.status)}${check.detail ? ` — ${t(check.detail)}` : ""}`,
     )
     .join("\n");
 }

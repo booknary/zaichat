@@ -18,6 +18,7 @@ import {
 } from "../retrieval/ranking";
 import { PaperSemanticSearchResult } from "../semantic/types";
 import { createID } from "../utils/ids";
+import { candidateExcerpt } from "../utils/candidatePreview";
 import { isAttachmentItem, isRegularItem } from "./itemTypes";
 import {
   adjacentPassage,
@@ -313,7 +314,7 @@ export class ZoteroRetriever {
         };
       }),
       items: ranked.map((item, index) =>
-        this.toCandidate(item, undefined, sources[index].sourceID),
+        this.toCandidate(item, undefined, sources[index].sourceID, recallTerms(query)),
       ),
       sources,
       discovery: {
@@ -407,7 +408,7 @@ export class ZoteroRetriever {
     const sources = ranked.map((item) => this.toSource(item));
     return {
       items: ranked.map((item, index) =>
-        this.toCandidate(item, undefined, sources[index].sourceID),
+        this.toCandidate(item, undefined, sources[index].sourceID, recallTerms(query)),
       ),
       sources,
       trace: ranked.map((item, index) => ({
@@ -473,7 +474,7 @@ export class ZoteroRetriever {
     const sources = ranked.map((item) => this.toSource(item, "fulltext"));
     return {
       items: ranked.map((item, index) =>
-        this.toCandidate(item, "indexed", sources[index].sourceID),
+        this.toCandidate(item, "indexed", sources[index].sourceID, recallTerms(query)),
       ),
       sources,
     };
@@ -669,7 +670,11 @@ export class ZoteroRetriever {
         )
           continue;
         const candidate = this.toCandidate(retrieved, undefined, source.sourceID);
-        if (fullAuthors) candidate.authors = retrieved.authors;
+        if (fullAuthors) {
+          candidate.authors = retrieved.authors;
+          candidate.authorsTruncated =
+            retrieved.readWarnings?.includes("authors") || false;
+        }
         items.push(candidate);
         sources.push(source);
       }
@@ -1062,6 +1067,7 @@ export class ZoteroRetriever {
     item: RetrievedItem,
     indexState?: string,
     sourceID?: string,
+    previewTerms: string[] = [],
   ): RetrievalCandidate {
     return {
       sourceID,
@@ -1069,6 +1075,9 @@ export class ZoteroRetriever {
       item: item.item,
       title: item.title,
       authors: item.authors.slice(0, 12),
+      authorCount: item.readWarnings?.includes("authors") ? null : item.authors.length,
+      authorsTruncated:
+        item.readWarnings?.includes("authors") || item.authors.length > 12,
       year: item.year,
       date: item.date,
       publicationTitle: item.publicationTitle,
@@ -1076,7 +1085,11 @@ export class ZoteroRetriever {
       itemType: item.itemType,
       language: item.language,
       tags: item.tags.slice(0, 20),
-      abstractExcerpt: clip(item.abstract, MAX_ABSTRACT_EXCERPT_CHARS),
+      abstractExcerpt: candidateExcerpt(
+        item.abstract,
+        previewTerms,
+        MAX_ABSTRACT_EXCERPT_CHARS,
+      ),
       fulltextMatchTerms: (item.fulltextMatchTerms || [])
         .slice(0, 12)
         .map((term) => clip(term, 120)),

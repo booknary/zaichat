@@ -261,7 +261,7 @@
   min-width: 0;
 }
 .zaichat-message-bubble::before {
-  content: "";
+  content: none;
   position: absolute;
   top: 18px;
   inset-inline-start: -7px;
@@ -272,7 +272,161 @@
   pointer-events: none;
 }
 .zaichat-message[data-role="user"] > .zaichat-message-bubble {
-  --zaichat-bubble-fill: color-mix(in srgb, var(--zaichat-accent) 14%, Canvas);
+  --zaichat-bubble-fill: color-mix(in srgb, CanvasText 6%, Canvas);
+}
+.zaichat-message[data-role="assistant"] > .zaichat-message-bubble {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.zaichat-message-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.zaichat-messages > .zaichat-message {
+  max-width: 760px;
+  margin-inline: auto;
+}
+.zaichat-messages > .zaichat-message[data-role="user"] {
+  width: 88%;
+  margin-inline-start: auto;
+  margin-inline-end: 0;
+}
+.zaichat-delivery {
+  font-weight: normal;
+  color: var(--zaichat-muted);
+}
+.zaichat-delivery[data-delivery="pending"] {
+  color: var(--zaichat-accent);
+}
+.zaichat-compose-surface {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 76%;
+  overflow: hidden;
+  padding: 8px 12px 12px;
+  background: var(--material-background, Canvas);
+  border-top: 1px solid var(--zaichat-border);
+}
+.zaichat-compose-surface > :not(.zaichat-interaction-panels) {
+  flex: 0 0 auto;
+}
+.zaichat-interaction-panels {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+.zaichat-compose-surface .zaichat-status,
+.zaichat-compose-surface .zaichat-context-bar,
+.zaichat-compose-surface .zaichat-token-usage {
+  padding: 4px 0;
+  border: 0;
+}
+.zaichat-compose-surface .zaichat-composer {
+  gap: 8px;
+  margin-top: 6px;
+  padding: 10px;
+  border: 1px solid var(--zaichat-border);
+  border-radius: 14px;
+  background: color-mix(in srgb, CanvasText 2%, Canvas);
+}
+.zaichat-compose-surface .zaichat-composer:focus-within {
+  border-color: var(--zaichat-accent);
+}
+.zaichat-compose-surface .zaichat-composer textarea {
+  min-height: 72px;
+  max-height: 180px;
+  padding: 2px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  line-height: 1.5;
+}
+.zaichat-composer-actions select {
+  max-width: 140px;
+  min-height: 30px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+.zaichat-run-progress,
+.zaichat-message-queue {
+  margin-bottom: 8px;
+  padding: 8px 0;
+  color: var(--zaichat-muted);
+  border-bottom: 1px solid var(--zaichat-border);
+}
+.zaichat-run-progress summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.zaichat-progress-count {
+  margin-inline-start: auto;
+  white-space: nowrap;
+}
+.zaichat-working-indicator {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--zaichat-accent);
+}
+.zaichat-progress-events {
+  max-height: 140px;
+  overflow: auto;
+  padding-top: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.zaichat-progress-events [data-error="true"] {
+  color: var(--zaichat-danger);
+}
+.zaichat-message-queue {
+  max-height: 180px;
+  overflow: auto;
+}
+.zaichat-queue-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.zaichat-queue-entry > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zaichat-question {
+  border-inline-start: 3px solid var(--zaichat-accent);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.zaichat-question p {
+  max-height: 6em;
+  overflow: auto;
+  margin: 6px 0;
+}
+.zaichat-question-choices,
+.zaichat-other-run {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+}
+.zaichat-question small {
+  display: block;
+  margin-top: 6px;
+  color: var(--zaichat-muted);
 }
 .zaichat-message[data-role="user"] > .zaichat-message-bubble::before {
   inset-inline-start: auto;
@@ -433,6 +587,7 @@
 }
 .zaichat-composer-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
@@ -734,4 +889,275 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
+}
+
+/* Keep secondary composer information compact in narrow sidebars. */
+.zaichat-composer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 10px;
+}
+.zaichat-composer-meta .zaichat-context-bar {
+  order: -1;
+  min-width: 0;
+}
+.zaichat-composer-meta .zaichat-token-usage {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.zaichat-token-usage summary {
+  cursor: pointer;
+}
+.zaichat-token-usage[open] {
+  flex-basis: 100%;
+}
+.zaichat-model-dialog {
+  overflow: auto;
+}
+.zaichat-model-dialog label {
+  display: block;
+  min-width: 0;
+}
+.zaichat-model-dialog select,
+.zaichat-model-dialog input:not([type="checkbox"]) {
+  width: 100%;
+  min-width: 0;
+}
+.zaichat-model-dialog p {
+  margin: 0;
+  font-size: var(--zaichat-font-small);
+}
+.zaichat-message-label {
+  flex-wrap: wrap;
+}
+.zaichat-progress-events {
+  overflow-wrap: anywhere;
+}
+
+.zaichat-model-dialog {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.zaichat-model-dialog > * {
+  flex-shrink: 0;
+  max-width: 100%;
+}
+.zaichat-model-dialog select {
+  text-overflow: ellipsis;
+}
+
+.zaichat-model-dialog select,
+.zaichat-model-dialog input:not([type="checkbox"]) {
+  display: block;
+  margin: 0;
+  box-sizing: border-box;
+}
+
+/* Shared chrome-safe menus and spacious chat surfaces. */
+.zaichat-shell button,
+.zaichat-shell input,
+.zaichat-shell textarea {
+  margin: 0;
+}
+.zaichat-shell button {
+  min-width: 0;
+}
+.zaichat-shell .zaichat-select-trigger {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: start;
+  padding: 8px 10px;
+  background: Canvas;
+}
+.zaichat-select-trigger > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zaichat-select-trigger > span:last-child {
+  flex: 0 0 auto;
+}
+.zaichat-select-menu {
+  z-index: 60;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 5px;
+  border: 1px solid var(--zaichat-border);
+  border-radius: 10px;
+  background: Canvas;
+  color: CanvasText;
+  box-shadow: 0 8px 28px #0003;
+  scrollbar-width: thin;
+}
+.zaichat-select-menu input {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  margin: 0 0 5px;
+  padding: 8px;
+  border: 1px solid var(--zaichat-border);
+  border-radius: 6px;
+  color: inherit;
+  background: Canvas;
+}
+.zaichat-select-menu button[role="option"] {
+  display: flex;
+  width: 100%;
+  min-height: 36px;
+  gap: 10px;
+  justify-content: space-between;
+  text-align: start;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+}
+.zaichat-select-menu button[role="option"] > span:first-child {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.zaichat-select-menu button[role="option"][data-active="true"],
+.zaichat-select-menu button[aria-selected="true"] {
+  background: color-mix(in srgb, var(--zaichat-accent) 12%, Canvas);
+}
+.zaichat-composer-actions .zaichat-select-trigger {
+  width: auto;
+  max-width: 170px;
+}
+.zaichat-dialog {
+  padding: 16px;
+  gap: 14px;
+  border-radius: 14px;
+}
+.zaichat-dialog-header {
+  flex: 0 0 auto;
+  min-height: 32px;
+}
+.zaichat-dialog-header button {
+  flex: 0 0 32px;
+  white-space: nowrap;
+}
+.zaichat-model-dialog label:not(.zaichat-checkbox-row) > .zaichat-select-trigger {
+  margin-top: 6px;
+}
+.zaichat-model-dialog .zaichat-checkbox-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.zaichat-model-dialog p {
+  color: var(--zaichat-muted);
+  line-height: 1.5;
+}
+.zaichat-model-dialog input:not([type="checkbox"]) {
+  padding: 9px 10px;
+  border-radius: 8px;
+}
+.zaichat-history-dialog {
+  width: min(560px, 100%);
+}
+.zaichat-history-dialog .zaichat-dialog-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.zaichat-history-row {
+  gap: 10px;
+  align-items: center;
+}
+.zaichat-shell .zaichat-history-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 12px;
+  min-height: 70px;
+  border: 0;
+  white-space: normal;
+  line-height: 1.5;
+  text-align: start;
+}
+.zaichat-history-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.zaichat-history-item time {
+  color: var(--zaichat-muted);
+  font-size: var(--zaichat-font-small);
+}
+.zaichat-history-delete {
+  opacity: 0.65;
+}
+.zaichat-history-delete:hover,
+.zaichat-history-delete:focus-visible {
+  opacity: 1;
+}
+.zaichat-dialog-search {
+  display: block;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--zaichat-border);
+  border-radius: 9px;
+  background: Canvas;
+  color: inherit;
+}
+.zaichat-edit-dialog textarea {
+  width: 100%;
+  min-height: 140px;
+  max-height: 40vh;
+  resize: vertical;
+  padding: 12px;
+  line-height: 1.6;
+  border: 1px solid var(--zaichat-border);
+  border-radius: 9px;
+  background: Canvas;
+  color: inherit;
+}
+.zaichat-heading {
+  gap: 5px;
+}
+.zaichat-heading > button {
+  justify-content: flex-start;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+  border-color: transparent;
+}
+.zaichat-messages {
+  padding: 22px 18px;
+}
+.zaichat-message {
+  margin-bottom: 30px;
+}
+.zaichat-compose-surface {
+  padding: 10px 14px 14px;
+}
+.zaichat-composer-actions {
+  gap: 8px;
+}
+
+.zaichat-model-advanced {
+  padding: 6px 0;
+  color: var(--zaichat-muted);
+}
+.zaichat-model-advanced summary {
+  cursor: pointer;
+}
+.zaichat-model-advanced > input,
+.zaichat-model-advanced > label {
+  margin-top: 10px !important;
+}
+.zaichat-model-advanced p {
+  margin-top: 8px;
 }

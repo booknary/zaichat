@@ -69,6 +69,8 @@ export function toolsForAgentState(
   query: string,
 ): any[] {
   const allowed = new Set<string>();
+  if (!["final-synthesis", "context-inspection"].includes(state))
+    allowed.add("request_clarification");
   if (state === "direct-reading") {
     for (const name of [
       "list_collections",

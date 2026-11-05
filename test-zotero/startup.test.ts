@@ -224,13 +224,11 @@ describe("ZaiChat startup", function () {
         const style = win.getComputedStyle(bubble);
         const tail = win.getComputedStyle(bubble, "::before");
         if (
-          style.borderTopLeftRadius !== "14px" ||
-          tail.width !== "8px" ||
-          tail.position !== "absolute"
+          style.borderTopLeftRadius !== (role === "user" ? "14px" : "0px") ||
+          tail.content !== "none" ||
+          (role === "assistant" && style.backgroundColor !== "rgba(0, 0, 0, 0)")
         )
-          throw new Error(`Missing ${role} bubble or tail`);
-        if (role === "user" ? tail.right !== "-7px" : tail.left !== "-7px")
-          throw new Error(`Wrong ${role} tail alignment`);
+          throw new Error(`Incorrect ${role} workbench message styling`);
         const source = add(message, "div", "zaichat-source-entry");
         const sourceStyle = win.getComputedStyle(source);
         if (
@@ -379,8 +377,29 @@ describe("ZaiChat startup", function () {
       const dialog = wrapper.querySelector(
         '[role="dialog"][aria-label="' + t("切换模型") + '"]',
       );
-      if (!dialog || dialog.querySelectorAll("select").length !== 2)
-        throw new Error("Model and effort dropdowns are missing");
+      if (!dialog) throw new Error("Model picker is missing");
+      for (const label of [
+        "模型",
+        "思考强度",
+        "Saved model profiles",
+        "Reasoning parameter",
+      ])
+        if (!dialog.querySelector('[role="combobox"][aria-label="' + t(label) + '"]'))
+          throw new Error("Model picker control is missing: " + label);
+      const effort = dialog.querySelector(
+        '[role="combobox"][aria-label="' + t("思考强度") + '"]',
+      ) as HTMLButtonElement;
+      if (!effort.textContent?.includes(t("low")))
+        throw new Error("Existing effort was not preserved");
+      effort.click();
+      await Zotero.Promise.delay(50);
+      const choices = Array.from(
+        wrapper.querySelectorAll('[role="option"]'),
+      ) as HTMLButtonElement[];
+      if (!choices.some((option) => option.textContent?.includes(t("max"))))
+        throw new Error("DeepSeek max effort is unavailable");
+      choices.find((option) => option.textContent?.includes(t("low")))!.click();
+      await Zotero.Promise.delay(50);
       const save = [...dialog.querySelectorAll("button")].find(
         (button) => button.textContent === t("保存并使用"),
       ) as HTMLButtonElement;

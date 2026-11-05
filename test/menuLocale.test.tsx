@@ -131,8 +131,21 @@ it.each(["zh-CN", "en-US"] as const)(
     ])
       if (label !== "Stop") expect(html).toContain(t(label));
     expect(html).toContain('value="high"');
-    expect(html).toContain('value="low"');
-    expect(html).toContain('value="max"');
+    for (const effort of ["low", "high", "max"] as const) {
+      const picker = renderToStaticMarkup(
+        <MenuLocaleContext.Provider value={language}>
+          <ModelPicker
+            profile={{ ...profile, reasoningEffort: effort }}
+            loadModels={async () => []}
+            onSave={() => {}}
+            onClose={() => {}}
+          />
+        </MenuLocaleContext.Provider>,
+      );
+      expect(picker).toContain('value="' + effort + '"');
+      expect(picker).toContain('title="' + t(effort) + '"');
+      expect(picker).not.toContain('value="medium"');
+    }
     expect(html).not.toContain('value="medium"');
     expect(html).toContain("我的问题");
     expect(html).toContain("创新 novelty genome");

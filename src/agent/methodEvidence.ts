@@ -1,4 +1,5 @@
 import type { SourceReference } from "../core/types";
+import { resolveCitationID } from "./citationRepair";
 import { answerSentences, type EvidenceProblem } from "./answerClaims";
 
 export interface EvidenceFact {
@@ -38,6 +39,33 @@ const normalize = (value: string) => value.replace(/\s+/gu, " ").trim();
 const negative =
   /(?:未|没有|不|并非|不是).{0,6}(?:进行|使用|采用|执行|靠)|\b(?:did not|does not|not performed|not used|without)\b/iu;
 
+/** Resolve against the whole run whitelist, never an ambiguous cited subset. */
+export function normalizeEvidenceFacts(
+  facts: EvidenceFact[],
+  sources: SourceReference[],
+) {
+  const problems: EvidenceProblem[] = [];
+  const normalized = facts.map((fact, factIndex) => {
+    if (!fact || typeof fact !== "object" || Array.isArray(fact)) return fact;
+    const match = resolveCitationID(
+      typeof fact.sourceID === "string" ? fact.sourceID : "",
+      sources,
+    );
+    if (!match.sourceID) {
+      problems.push({
+        code: match.error,
+        factIndex,
+        sourceID: fact.sourceID,
+        message:
+          "Evidence fact sourceID is unknown or ambiguous. Use an exact current source ID; this is not a quote-text mismatch.",
+      });
+      return fact;
+    }
+    return { ...fact, sourceID: match.sourceID };
+  });
+  return { facts: normalized, problems };
+}
+
 export function evidenceFactProblems(
   sources: SourceReference[],
   facts: EvidenceFact[],
@@ -53,6 +81,16 @@ export function evidenceFactProblems(
         },
       ];
     const source = sources.find((s) => s.sourceID === fact.sourceID);
+    if (!source)
+      return [
+        {
+          code: "uncited-source-id",
+          factIndex,
+          sourceID: fact.sourceID,
+          message:
+            "Evidence fact must reference a cited current source. Correct sourceIDs and the fact sourceID before checking quote text.",
+        },
+      ];
     if (
       !source?.snippet ||
       typeof fact.quote !== "string" ||

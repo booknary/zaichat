@@ -5,10 +5,10 @@
 面向 **Zotero 本地文库**的对话助手：根据模糊描述找文献、基于证据问答、比较摘要，
 并有策略地读取原文片段，而不是把整个文库一次性上传给模型。
 
-**当前版本：0.8.0-beta.46 · Zotero 9–10.0 · Windows x64 CPU 本地语义运行环境。**
+**当前版本：0.8.0-beta.51 · Zotero 9–10.0 · Windows x64 CPU 本地语义运行环境。**
 
-[下载安装包](https://github.com/booknary/zaichat/releases/download/v0.8.0-beta.46/zaichat-0.8.0-beta.46.xpi)
-· [发布说明](https://github.com/booknary/zaichat/releases/tag/v0.8.0-beta.46)
+[下载安装包](https://github.com/booknary/zaichat/releases/download/v0.8.0-beta.51/zaichat-0.8.0-beta.51.xpi)
+· [发布说明](https://github.com/booknary/zaichat/releases/tag/v0.8.0-beta.51)
 
 ## 界面与功能
 
@@ -35,13 +35,14 @@ _截图来自真实 Zotero 10 和插件界面，使用合成文献及明确标�
 
 ## 安装和首次配置
 
-1. 从 Release 下载 **`zaichat-0.8.0-beta.46.xpi`**。GitHub 自动生成的源码 ZIP 不是插件安装包。
+1. 从 Release 下载 **`zaichat-0.8.0-beta.51.xpi`**。GitHub 自动生成的源码 ZIP 不是插件安装包。
 2. Zotero 中打开 **工具 → 插件**，选择 **从文件安装插件…**，选中 XPI；按宿主提示重启。
 3. 打开 **Zotero 设置 → ZaiChat**，填写兼容 OpenAI 的 API 地址、密钥和准确的对话模型名，
    保存配置。可用“获取模型列表”选择名称，但模型出现在列表里不代表支持聊天或工具调用。
 4. 使用工具栏图标、工具菜单、条目右键菜单或 **Ctrl/Cmd+Shift+J** 打开聊天。
 
-模型服务采用 `/chat/completions` 协议，不是 OpenAI Responses API。支持兼容的
+本版支持 DeepSeek 官方、火山方舟、阿里云百炼和 OpenAI 官方配置，以及 OpenAI
+推理模型的 Responses 适配，详见[平台配置与限制](docs/provider-compatibility.md)。支持兼容的
 OpenAI、OpenRouter、DeepSeek 端点及本地服务，实际能力以提供商为准。思考档位来自
 插件适配规则，不是模型列表接口；未知服务需确认支持情况。远程地址必须 HTTPS，
 仅回环本地服务允许 HTTP。“测试连接”会发送少量真实请求，可能产生费用。

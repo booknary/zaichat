@@ -1,3 +1,5 @@
+import { resolveAPIStyle, detectProvider } from "./providerPresets";
+import { responsesRequest, readResponses, responsesAsChat } from "./responsesProtocol";
 import { ModelProfile, ToolCall } from "../core/types";
 import { parseTokenUsage, TokenUsage } from "./tokenUsage";
 import {
@@ -13,6 +15,7 @@ export type ProviderMessage = {
   tool_call_id?: string;
   tool_calls?: any[];
   protocolRequired?: boolean;
+  responseItems?: any[];
 };
 export type ProviderResponse = {
   usage?: TokenUsage;
@@ -64,7 +67,7 @@ export class OpenAICompatibleProvider {
     onDelta?: (text: string) => void,
     options: ProviderRequestOptions = {},
   ): Promise<ProviderResponse> {
-    const capabilityKey = `${profile.id}\n${profile.baseURL}\n${profile.model}`;
+    const capabilityKey = `${profile.id}\n${profile.baseURL}\n${profile.model}\n${profile.provider || "auto"}\n${profile.apiStyle || "auto"}\n${profile.reasoningMode || "auto"}\n${profile.reasoningEnabled}\n${profile.reasoningEffort}`;
     const protocol =
       profile.protocol === "auto"
         ? this.capability.get(capabilityKey) || "native-tools"
@@ -189,6 +192,58 @@ export class OpenAICompatibleProvider {
     onDelta?: (text: string) => void,
     options: ProviderRequestOptions = {},
   ): Promise<ProviderResponse> {
+    const capabilities = resolveProviderCapabilities(profile);
+    const stageOptions = stageModelOptions(profile, options.stage || "tool-routing");
+    const preserveEmptyReasoning =
+      capabilities.requiresReasoningContentForToolCalls && stageOptions.thinkingEnabled;
+    const apiStyle = resolveAPIStyle(profile);
+    const requestMessages =
+      protocol === "json-actions" ? withJSONProtocol(messages, tools) : messages;
+    const body: any = {
+      model: profile.model,
+      messages:
+        apiStyle === "responses"
+          ? []
+          : protocol === "json-actions"
+            ? wireMessages(withJSONProtocol(messages, tools), capabilities, false)
+            : wireMessages(messages, capabilities, stageOptions.thinkingEnabled),
+      stream: profile.streaming,
+    };
+    if (options.maxTokens)
+      body.max_tokens = Math.max(1, Math.min(2048, options.maxTokens));
+    if (
+      profile.streaming &&
+      ["api.deepseek.com", "api.openai.com"].includes(new URL(profile.baseURL).hostname)
+    )
+      body.stream_options = { include_usage: true };
+    if (protocol === "native-tools" && tools.length) {
+      body.tools = tools;
+      if (
+        capabilities.supportsToolChoice &&
+        (!stageOptions.thinkingEnabled || capabilities.supportsToolChoiceInThinking)
+      )
+        body.tool_choice = "auto";
+    }
+    if (capabilities.thinkingParameter === "enable-thinking") {
+      body.enable_thinking = stageOptions.thinkingEnabled;
+    } else if (capabilities.thinkingParameter === "thinking") {
+      body.thinking = {
+        type: stageOptions.thinkingEnabled ? "enabled" : "disabled",
+      };
+    }
+    if (stageOptions.reasoningEffort)
+      body.reasoning_effort = stageOptions.reasoningEffort;
+    const requestBody =
+      apiStyle === "responses"
+        ? responsesRequest(profile, requestMessages, body, protocol)
+        : body;
+    if (apiStyle === "chat-completions" && detectProvider(profile) === "openai") {
+      requestBody.store = false;
+      if (body.max_tokens && capabilities.supportsThinking) {
+        requestBody.max_completion_tokens = body.max_tokens;
+        delete requestBody.max_tokens;
+      }
+    }
     const controller = new AbortController();
     const timing = requestTimeouts(profile, options.stage || "tool-routing");
     let responseStarted = false;
@@ -207,50 +262,19 @@ export class OpenAICompatibleProvider {
     const abort = () => controller.abort(signal.reason);
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
-    const capabilities = resolveProviderCapabilities(profile);
-    const stageOptions = stageModelOptions(profile, options.stage || "tool-routing");
-    const body: any = {
-      model: profile.model,
-      messages:
-        protocol === "json-actions"
-          ? wireMessages(withJSONProtocol(messages, tools), capabilities, false)
-          : wireMessages(messages, capabilities, stageOptions.thinkingEnabled),
-      stream: profile.streaming,
-    };
-    if (options.maxTokens)
-      body.max_tokens = Math.max(1, Math.min(2048, options.maxTokens));
-    if (
-      profile.streaming &&
-      ["api.deepseek.com", "api.openai.com"].includes(new URL(profile.baseURL).hostname)
-    )
-      body.stream_options = { include_usage: true };
-    if (protocol === "native-tools" && tools.length) {
-      body.tools = tools;
-      if (
-        capabilities.supportsToolChoice &&
-        (!stageOptions.thinkingEnabled || capabilities.supportsToolChoiceInThinking)
-      )
-        body.tool_choice = "auto";
-    }
-    if (capabilities.explicitThinkingToggle) {
-      body.thinking = {
-        type: stageOptions.thinkingEnabled ? "enabled" : "disabled",
-      };
-    } else if (stageOptions.thinkingEnabled) {
-      body.thinking = { type: "enabled" };
-    }
-    if (stageOptions.reasoningEffort)
-      body.reasoning_effort = stageOptions.reasoningEffort;
     try {
-      const response = await fetch(`${profile.baseURL}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(profile.apiKey ? { Authorization: `Bearer ${profile.apiKey}` } : {}),
+      const response = await fetch(
+        `${profile.baseURL}/${apiStyle === "responses" ? "responses" : "chat/completions"}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(profile.apiKey ? { Authorization: `Bearer ${profile.apiKey}` } : {}),
+          },
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
         },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      );
       if (!response.ok) {
         const text = await response.text();
         if (protocol === "native-tools" && isUnsupportedTools(response.status, text))
@@ -272,6 +296,19 @@ export class OpenAICompatibleProvider {
           response.status,
         );
       }
+      if (apiStyle === "responses") {
+        const payload = await readResponses(
+          response,
+          profile.streaming,
+          onDelta,
+          activity,
+        );
+        const parsed = parseJSONResponse(responsesAsChat(payload), protocol, false);
+        // Keep opaque reasoning items with their function calls; existing message budgeting counts them.
+        if (protocol === "native-tools")
+          parsed.assistantMessage.responseItems = payload.output;
+        return parsed;
+      }
       if (profile.streaming && response.body)
         return await parseSSE(
           response,
@@ -279,8 +316,9 @@ export class OpenAICompatibleProvider {
           onDelta,
           options.onReasoningDelta,
           activity,
+          preserveEmptyReasoning,
         );
-      return parseJSONResponse(await response.json(), protocol);
+      return parseJSONResponse(await response.json(), protocol, preserveEmptyReasoning);
     } catch (error) {
       if (controller.signal.aborted && !signal.aborted)
         throw new ModelProviderError(
@@ -308,7 +346,8 @@ export class OpenAICompatibleProvider {
 
 export function requestTimeouts(profile: ModelProfile, stage: AgentStage) {
   const idleMs = Math.max(5000, Math.min(600000, profile.timeoutMs || 45000));
-  const thinking = stageModelOptions(profile, stage).thinkingEnabled;
+  const thinking =
+    profile.reasoningEnabled || stageModelOptions(profile, stage).thinkingEnabled;
   return {
     idleMs,
     initialMs: thinking ? Math.max(180000, idleMs) : idleMs,
@@ -347,6 +386,7 @@ async function parseSSE(
   onDelta?: (text: string) => void,
   onReasoningDelta?: (text: string) => void,
   onActivity?: () => void,
+  preserveEmptyReasoning = false,
 ): Promise<ProviderResponse> {
   const reader = response.body!.getReader() as any;
   const decoder = new TextDecoder();
@@ -405,7 +445,12 @@ async function parseSSE(
     return { ...parsed, reasoningContent, usage };
   }
   const toolCalls = [...toolParts.values()].map(parseNativeToolCall);
-  const assistantMessage = providerAssistantMessage(text, reasoningContent, toolParts);
+  const assistantMessage = providerAssistantMessage(
+    text,
+    reasoningContent,
+    toolParts,
+    preserveEmptyReasoning,
+  );
   return {
     usage,
     text,
@@ -420,6 +465,7 @@ async function parseSSE(
 function parseJSONResponse(
   json: any,
   protocol: "native-tools" | "json-actions",
+  preserveEmptyReasoning = false,
 ): ProviderResponse {
   const message = json?.choices?.[0]?.message;
   if (!message)
@@ -440,7 +486,9 @@ function parseJSONResponse(
     assistantMessage: {
       role: "assistant",
       content: text,
-      ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
+      ...(reasoningContent || preserveEmptyReasoning
+        ? { reasoning_content: reasoningContent }
+        : {}),
       ...(rawToolCalls.length ? { tool_calls: rawToolCalls } : {}),
     },
     finishReason: json.choices?.[0]?.finish_reason,
@@ -502,12 +550,16 @@ function providerAssistantMessage(
   content: string,
   reasoningContent: string,
   toolParts: Map<number, any>,
+  preserveEmptyReasoning = false,
 ): ProviderMessage {
   const toolCalls = [...toolParts.values()];
   return {
     role: "assistant",
     content,
-    ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
+    // Zero reasoning characters still require an explicit field in DeepSeek history.
+    ...(reasoningContent || preserveEmptyReasoning
+      ? { reasoning_content: reasoningContent }
+      : {}),
     ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
   };
 }
@@ -533,7 +585,7 @@ function wireMessages(
         typeof message.reasoning_content !== "string"
       )
         throw new ModelProviderError(
-          "DeepSeek thinking tool-call history is missing reasoning_content",
+          "Thinking tool-call history is missing reasoning_content",
           "invalid-response",
         );
     }
@@ -557,13 +609,15 @@ function withJSONProtocol(
 function isUnsupportedTools(status: number, text: string): boolean {
   return (
     [400, 404, 422].includes(status) &&
-    /tool|function.call|unsupported|unknown (field|parameter)/i.test(text)
+    /tools?|function[_ .-]?call/i.test(text) &&
+    /not support|unsupported|unknown|not allowed|unrecognized/i.test(text)
   );
 }
 function isUnsupportedStream(status: number, text: string): boolean {
   return (
     [400, 404, 422].includes(status) &&
-    /stream|sse|unsupported|unknown (field|parameter)/i.test(text)
+    /stream|sse/i.test(text) &&
+    /not support|unsupported|unknown|not allowed|unrecognized/i.test(text)
   );
 }
 

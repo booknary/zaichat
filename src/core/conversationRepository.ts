@@ -141,7 +141,7 @@ export class ConversationRepository {
         throw new Error("Unsupported conversation schema");
       if (
         parsed.lastRun &&
-        ["running", "waiting-approval"].includes(parsed.lastRun.status)
+        ["running", "waiting-approval", "waiting-user"].includes(parsed.lastRun.status)
       ) {
         parsed.lastRun = {
           ...parsed.lastRun,
@@ -150,6 +150,9 @@ export class ConversationRepository {
           pendingBatchID: undefined,
         };
       }
+      for (const message of parsed.messages)
+        if (message.delivery === "pending") message.delivery = "not-applied";
+      for (const message of parsed.queuedMessages || []) message.needsReview = true;
       this.conversations.set(entry.id, parsed);
     } catch {
       entry.unreadable = true;

@@ -37,6 +37,21 @@ export function classifyPassage(
     });
   }
   const heading = boundaries.sort((a, b) => a.index - b.index).at(-1);
+  if (heading?.section === "figure-legend" && heading.index <= start) {
+    const between = text.slice(heading.index, start);
+    // PDF text often loses subheading styles. Do not let a caption label bleed
+    // into a later short heading or indefinitely into the surrounding article.
+    const lines = between.split(/\r?\n/u).slice(1);
+    const possibleHeading = lines.some((line) => {
+      const value = line.trim();
+      return (
+        /^[A-Z][^.!?。！？:：|]{3,100}$/u.test(value) &&
+        value.split(/\s+/u).length <= 14
+      );
+    });
+    if (possibleHeading || between.length > 2000)
+      return { section: "unknown", basis: "unknown", confidence: "low" };
+  }
   if (heading && heading.index <= start)
     return {
       section: heading.section,

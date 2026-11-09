@@ -1,7 +1,7 @@
 {
   "name": "zaichat",
   "type": "module",
-  "version": "0.8.0-beta.51",
+  "version": "0.8.0-beta.52",
   "description": "A local-first conversational literature management agent for Zotero.",
   "repository": {
     "type": "git",

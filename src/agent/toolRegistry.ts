@@ -46,7 +46,9 @@ import {
 } from "./methodEvidence";
 import { causalClaimProblems } from "./answerClaims";
 import { coverageClaimProblems } from "./coverageClaims";
+import { methodScopeProblems } from "./methodScope";
 import { repairAnswerDraft, type AnswerDraft } from "./answerRepair";
+import { answerRecovery, candidateOnlyAnswer } from "./answerRecovery";
 
 export interface ToolExecutionContext {
   conversationID: string;
@@ -458,11 +460,12 @@ export class ToolRegistry {
       ),
       definition(
         "finish_answer",
-        "Finish using current source IDs (max 40). Cite inline as [sourceID]. Metadata supports bibliographic identification. Method/PDF workflow answers require evidenceFacts: verbatim current quotes and atomic facts per paper; references support mentions only. Association is not proved causality. Qualify negative findings beside each claim. After rejection, omit answer and use repair.answerPatches for exact unique draft spans and/or corrected evidenceFacts; the run-local draft is retained and all checks run again. Keep sourceIDs and evidenceInsufficient. Do not search/read just to repair quotes.",
+        "Finish using current source IDs (max 40). Cite inline as [sourceID]. Metadata supports bibliographic identification. Method/PDF workflow answers require evidenceFacts: verbatim current quotes and atomic facts per paper; references support mentions only. Association is not proved causality. Qualify negative findings beside each claim. After rejection, omit answer and use repair.answerPatches for exact unique draft spans and/or corrected evidenceFacts; the run-local draft is retained and all checks run again. Keep sourceIDs and evidenceInsufficient. Read only missing evidence when recovery.requiredActions requests it. candidateOnly=true returns a program-generated unverified candidate list instead of the supplied answer; use it when verification cannot be completed.",
         {
           type: "object",
           properties: {
             answer: { type: "string" },
+            candidateOnly: { type: "boolean" },
             repair: {
               type: "object",
               properties: {
@@ -1513,9 +1516,29 @@ export class ToolRegistry {
         }
         case "finish_answer": {
           const input = call.arguments as Record<string, any>;
+          if (input.candidateOnly === true) {
+            const ids = parseStrings(input.sourceIDs, 40);
+            const sources = this.resolveSources(ids);
+            if (!ids.length || sources.length !== ids.length)
+              throw new Error("candidateOnly requires known current source IDs");
+            const answer = candidateOnlyAnswer(sources, context.userQuery || "");
+            this.answerDraft = undefined;
+            return {
+              ...result(
+                call,
+                true,
+                { answer, evidenceInsufficient: true },
+                "Answer completed with unverified candidates",
+              ),
+              sources: sources.filter((source) =>
+                answer.includes("[" + source.sourceID + "]"),
+              ),
+            };
+          }
           const args =
             input.repair !== undefined ||
-            (input.answer === undefined && Array.isArray(input.evidenceFacts))
+            (input.answer === undefined &&
+              (Array.isArray(input.evidenceFacts) || Boolean(this.answerDraft)))
               ? repairAnswerDraft(this.answerDraft, input)
               : { ...input };
           if (typeof args.answer !== "string" || !args.answer.trim())
@@ -1664,6 +1687,9 @@ export class ToolRegistry {
                 ),
             ),
             ...causalClaimProblems(answer, sources),
+            ...(methodAudit || needsAttachmentAudit(context.userQuery || "")
+              ? methodScopeProblems(answer, sources, facts)
+              : []),
             ...(methodAudit ? methodAbsenceProblems(answer, sources, facts) : []),
           ];
           const issue = methodEvidenceIssue(
@@ -1674,33 +1700,41 @@ export class ToolRegistry {
             args.evidenceInsufficient === true,
             this.activePlan?.intent === "method_use",
           );
-          if (issue || problems.length)
+          const missingInventories =
+            needsAttachmentAudit(context.userQuery || "") &&
+            typeof this.retriever.listAttachments === "function"
+              ? sources.filter(
+                  (source) =>
+                    !this.inventories.has(
+                      source.item.libraryID + ":" + source.item.itemKey,
+                    ),
+                )
+              : [];
+          if (issue || problems.length || missingInventories.length) {
+            const recovery = answerRecovery(
+              problems,
+              sources,
+              missingInventories,
+              Boolean(issue),
+            );
             return result(
               call,
               false,
               {
-                error: problems[0]?.message || issue,
+                error:
+                  problems[0]?.message ||
+                  issue ||
+                  "Attachment inventory is required for the cited papers.",
                 issues: problems.slice(0, 8),
                 draftRetained: true,
                 availableEvidence: this.evidenceChoices().slice(0, 6),
-                instruction:
-                  "The draft is retained in this run. Omit answer and submit finish_answer with repair.answerPatches (exact original span/replacement) and/or corrected evidenceFacts, plus sourceIDs and evidenceInsufficient. Correct the reported fact indexes/claim spans, not the whole answer. Do not search or reread solely to repair. All checks run again; quote/provenance checks are not semantic entailment.",
+                missingInventories: missingInventories.map((source) => source.item),
+                recovery,
+                instruction: recovery.instruction,
               },
               "Answer needs evidence/qualification repair",
             );
-          if (
-            needsAttachmentAudit(context.userQuery || "") &&
-            typeof this.retriever.listAttachments === "function" &&
-            sources.some(
-              (source) =>
-                !this.inventories.has(
-                  `${source.item.libraryID}:${source.item.itemKey}`,
-                ),
-            )
-          )
-            throw new Error(
-              "Attachment inventory is required for this analysis/supplement verification. Call list_attachments on the cited paper. Describe unread files and bounded negative evidence; main-PDF snippets cannot establish supplement absence.",
-            );
+          }
           const abstractComparison =
             /摘要|abstract/iu.test(context.userQuery || "") &&
             /比较|对比|compare|comparison/iu.test(context.userQuery || "");
@@ -1731,11 +1765,43 @@ export class ToolRegistry {
             sources.some(
               (source) =>
                 source.field === "title" &&
-                this.directRefs.has(`${source.item.libraryID}:${source.item.itemKey}`),
+                this.directRefs.has(
+                  `${source.item.libraryID}:${source.item.itemKey}`,
+                ) &&
+                !sources.some(
+                  (other) =>
+                    other.snippet &&
+                    other.item.libraryID === source.item.libraryID &&
+                    other.item.itemKey === source.item.itemKey,
+                ),
             )
           )
-            throw new Error(
-              "Collection title/date sources cannot support findings from earlier abstracts. Read the relevant abstracts in this run and cite their IDs, or limit the answer to titles and counts.",
+            return result(
+              call,
+              false,
+              {
+                error:
+                  "Collection title/date sources cannot support findings from earlier abstracts. Read the relevant abstracts in this run and cite their IDs, or limit the answer to titles and counts.",
+                draftRetained: true,
+                recovery: {
+                  kind: "read-evidence",
+                  requiredActions: [
+                    {
+                      tool: "read_abstracts",
+                      arguments: {
+                        refs: dedupeRefs(
+                          sources
+                            .filter((source) => source.field === "title")
+                            .map((source) => source.item),
+                        ).slice(0, 4),
+                      },
+                    },
+                  ],
+                  instruction:
+                    "Read the relevant abstracts and cite the returned evidence IDs. A title citation may accompany current passage evidence for the same paper. Use candidateOnly=true if only candidate identification is supported.",
+                },
+              },
+              "Answer needs evidence/qualification repair",
             );
           if (
             sourceIDs.length &&
@@ -1769,6 +1835,17 @@ export class ToolRegistry {
                 error:
                   "A claim about method use, results, or arguments requires a contextual source from read_attachment_snippets",
                 availableEvidence,
+                draftRetained: true,
+                recovery: answerRecovery(
+                  availableEvidence.length
+                    ? []
+                    : sources.map((source) => ({
+                        code: "missing-passage",
+                        sourceID: source.sourceID,
+                        message: "Read supporting evidence",
+                      })),
+                  sources,
+                ),
                 instruction:
                   "The cited IDs identify metadata, not passages. Review the already returned passages and resubmit finish_answer with the IDs supporting your claims. Do not reread attachments solely to obtain new IDs. If none support the claims, read evidence or remove the unsupported claims.",
               },
@@ -1818,7 +1895,19 @@ export class ToolRegistry {
       return result(
         call,
         false,
-        { error: message },
+        call.name === "finish_answer"
+          ? {
+              error: message,
+              draftRetained: Boolean(this.answerDraft),
+              recovery: {
+                kind: "repair-parameters",
+                requiredActions: [],
+                instruction: this.answerDraft
+                  ? "Correct the reported parameters. The draft is retained; omitted answer reuses it. Use evidenceFacts=[] explicitly to remove facts, or candidateOnly=true for unverified candidates. Checks are not bypassed."
+                  : "No rejected draft exists. Submit a full answer with current sourceIDs, or candidateOnly=true with current candidates; do not submit a repair.",
+              },
+            }
+          : { error: message },
         `Tool ${call.name} failed: ${message}`,
       );
     }

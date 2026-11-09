@@ -24,7 +24,11 @@ export function repairAnswerDraft(
   const patches = input.repair?.answerPatches ?? [];
   if (!Array.isArray(patches) || patches.length > 8)
     throw new Error("At most eight answer patches are allowed");
-  if (!patches.length && !Array.isArray(input.evidenceFacts))
+  if (
+    !patches.length &&
+    !Array.isArray(input.evidenceFacts) &&
+    !Array.isArray(input.sourceIDs)
+  )
     throw new Error("Repair needs answerPatches or corrected evidenceFacts");
   let answer = previous.answer;
   for (const patch of patches) {

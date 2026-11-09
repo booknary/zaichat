@@ -375,3 +375,55 @@ function deepSeekProfile(): ModelProfile {
     reasoningEffort: "max",
   };
 }
+
+it("keeps actionable answer recovery and the current reading tools visible", async () => {
+  const harness = createHarness(
+    [
+      toolResponse("plan", "plan_search", planArgs()),
+      toolResponse("bad", "finish_answer", {
+        answer: "Unverified",
+        sourceIDs: ["source-plan"],
+        evidenceInsufficient: false,
+      }),
+      toolResponse("read", "verify_candidates", { sourceIDs: ["source-plan"] }),
+      toolResponse("good", "finish_answer", {
+        answer: "Qualified answer",
+        sourceIDs: [],
+        evidenceInsufficient: true,
+      }),
+    ],
+    { productiveVerification: true },
+  );
+  const execute = harness.tools.execute.getMockImplementation()!;
+  harness.tools.execute.mockImplementation(async (call) =>
+    call.id === "bad"
+      ? {
+          toolCallID: call.id,
+          name: call.name,
+          ok: false,
+          summary: "Answer needs evidence/qualification repair",
+          content: {
+            error: "Missing passage",
+            recovery: {
+              kind: "read-evidence",
+              requiredActions: [
+                {
+                  tool: "verify_candidates",
+                  arguments: { sourceIDs: ["source-plan"] },
+                },
+              ],
+              instruction: "Read missing passage",
+            },
+          },
+        }
+      : execute(call),
+  );
+  const result = await run(harness, "Find and verify the requested method");
+  expect(result.run.status).toBe("completed");
+  expect(result.answer).toBe("Qualified answer");
+  const request = harness.provider.complete.mock.calls[2];
+  expect(JSON.stringify(request[1])).toContain("Current available tools:");
+  expect(JSON.stringify(request[1])).toContain("Read missing passage");
+  expect(harness.exposedTools[2]).toContain("verify_candidates");
+  expect(harness.exposedTools.flat()).not.toContain("propose_add_tags");
+});

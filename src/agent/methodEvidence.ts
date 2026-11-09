@@ -91,8 +91,17 @@ export function evidenceFactProblems(
             "Evidence fact must reference a cited current source. Correct sourceIDs and the fact sourceID before checking quote text.",
         },
       ];
+    if (!source.snippet)
+      return [
+        {
+          code: "missing-passage",
+          factIndex,
+          sourceID: fact.sourceID,
+          message:
+            "This source is a discovery preview, not a delivered passage. Read the paper with verify_candidates before quoting it, or return unverified candidates.",
+        },
+      ];
     if (
-      !source?.snippet ||
       typeof fact.quote !== "string" ||
       fact.quote.trim().length < 12 ||
       typeof fact.fact !== "string" ||

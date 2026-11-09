@@ -5,10 +5,10 @@
 面向 **Zotero 本地文库**的对话助手：根据模糊描述找文献、基于证据问答、比较摘要，
 并有策略地读取原文片段，而不是把整个文库一次性上传给模型。
 
-**当前版本：0.8.0-beta.51 · Zotero 9–10.0 · Windows x64 CPU 本地语义运行环境。**
+**当前版本：0.8.0-beta.52 · Zotero 9–10.0 · Windows x64 CPU 本地语义运行环境。**
 
-[下载安装包](https://github.com/booknary/zaichat/releases/download/v0.8.0-beta.51/zaichat-0.8.0-beta.51.xpi)
-· [发布说明](https://github.com/booknary/zaichat/releases/tag/v0.8.0-beta.51)
+[下载安装包](https://github.com/booknary/zaichat/releases/download/v0.8.0-beta.52/zaichat-0.8.0-beta.52.xpi)
+· [发布说明](https://github.com/booknary/zaichat/releases/tag/v0.8.0-beta.52)
 
 ## 界面与功能
 
@@ -35,7 +35,7 @@ _截图来自真实 Zotero 10 和插件界面，使用合成文献及明确标�
 
 ## 安装和首次配置
 
-1. 从 Release 下载 **`zaichat-0.8.0-beta.51.xpi`**。GitHub 自动生成的源码 ZIP 不是插件安装包。
+1. 从 Release 下载 **`zaichat-0.8.0-beta.52.xpi`**。GitHub 自动生成的源码 ZIP 不是插件安装包。
 2. Zotero 中打开 **工具 → 插件**，选择 **从文件安装插件…**，选中 XPI；按宿主提示重启。
 3. 打开 **Zotero 设置 → ZaiChat**，填写兼容 OpenAI 的 API 地址、密钥和准确的对话模型名，
    保存配置。可用“获取模型列表”选择名称，但模型出现在列表里不代表支持聊天或工具调用。
